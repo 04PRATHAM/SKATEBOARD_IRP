@@ -85,4 +85,3 @@ multi_object_steering_sim/
 - The simulation is a **compulsory and major** part of the project, not optional visualization
 - The sensor is an RGB + DEPTH camera (RGB-D)
 - The final architecture supports: RGB + Depth -> ROS 2 -> Perception -> Multi-object reasoning -> Steering decision -> Vehicle controller -> Isaac Sim vehicle
-- Do not create a generic TurtleBot, do not use differential drive unless justified, do not use LiDAR, do not make RGB or depth optional, do not hard-code dimensions or topic names
