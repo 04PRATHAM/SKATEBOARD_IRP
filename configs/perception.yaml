@@ -1,0 +1,63 @@
+# Perception + camera-only autonomy configuration (SKATEBOARD_IRP Phase 9).
+# All runtime parameters live here — do NOT hard-code them in Python files.
+# Same file deploys on the real vehicle (topics/frames identical by contract).
+
+perception:
+  # Pretrained checkpoint (exact file; ultralytics auto-downloads on first use
+  # if missing — see docs/YOLO26_RGBD_AUTONOMY.md §2).
+  # Override per-deployment (e.g. real vehicle path) via --config or env.
+  model_path: "/home/ubuntu/SKATEBOARD_IRP/ros2_ws/src/rgbd_perception/model/yolo26n-seg.pt"
+  task: "segment"              # do NOT change: masks required for depth association
+
+  # Inference
+  confidence_threshold: 0.35   # do NOT lower just to make tests pass (record misses honestly)
+  iou_threshold: 0.7           # NMS IoU
+  image_size: 640              # inference imgsz (camera is 640x480; keep aspect via letterbox)
+  device: "cuda:0"             # fallback to "cpu" automatically if CUDA unavailable
+  half_precision: true         # FP16 on CUDA; ignored on CPU
+
+  # Classes: COCO-pretrained IDs. Runtime treats ONLY these as obstacles;
+  # never assume every COCO class is physical (see obstacle_classes).
+  target_classes: [0]          # 0 = person (primary contract)
+  obstacle_classes: [0]        # classes the planner must avoid; others reported, not avoided
+  class_names_override: {}     # e.g. {0: person}; empty = use model names
+
+  # Depth association (mask-first, RGB-only model input — NEVER 4-channel)
+  depth_method: "mask_median"  # mask_median | mask_trimmed | bbox_center
+  trim_fraction: 0.1           # trimmed-median cut per side (mask_trimmed)
+  min_depth: 0.3               # m — reject below (NaN/inf/zero/invalid rejected always)
+  max_depth: 10.0              # m — camera far clip; reject above
+  min_valid_fraction: 0.05     # min fraction of valid mask pixels, else drop detection
+
+  # Runtime robustness (conventions match AckermannROSController: cmd_timeout 0.5 s)
+  perception_rate: 10.0        # Hz target for YOLO inference (frames may drop; never block)
+  stale_timeout: 0.5           # s without valid perception -> planner commands stop
+  sync_tolerance: 0.1          # s max |t_rgb - t_depth| for a fused pair
+
+  # Debug visualization (Phase 15 overlays; off by default on vehicle)
+  debug_visualization: false
+  debug_out_dir: "/tmp/opencode/yolo_debug"
+
+planner:
+  # Camera-only local free-space policy (no odom, no GT, no waypoints at runtime)
+  corridor_width: 1.2          # m lateral width evaluated per LEFT/CENTER/RIGHT sector
+  lookahead_min: 1.0           # m — ignore detections closer than this (too late)
+  lookahead_max: 8.0           # m — ignore detections beyond (too far to matter)
+  slow_distance: 4.0           # m — nearest center obstacle below this -> slow
+  stop_distance: 1.5           # m — nearest center obstacle below this -> stop
+  cruise_speed: 0.8            # m/s — clear corridor
+  slow_speed: 0.35             # m/s — caution
+  max_steer: 0.6               # rad — mirrors vehicle.yaml max_steering_angle
+  steer_gain: 0.5              # corridor-offset -> steer mapping gain
+  # NOTE: stale perception -> speed 0 (stop), last steer held (mirrors controller failsafe)
+
+topics:
+  rgb: "/camera/rgb/image_raw"
+  depth: "/camera/depth/image_raw"
+  rgb_info: "/camera/rgb/camera_info"
+  depth_info: "/camera/depth/camera_info"
+  detections: "/perception/detections_2d"   # NEW (Phase C) — Detection2D-style
+  objects: "/perception/objects_3d"         # NEW (Phase D) — Object3D-style
+  cmd: "/cmd_ackermann"                     # EXISTING (AckermannDriveStamped)
+  rgb_optical_frame: "camera_rgb_optical_frame"
+  depth_optical_frame: "camera_depth_optical_frame"

@@ -1,0 +1,33 @@
+# TEST A (Phase H): pedestrian walking TOWARD vehicle from ahead -> slow -> stop, no contact.
+# Vehicle starts on the open lane x=12.5 facing SOUTH; one S3 human
+# approaches from 6 m ahead walking SOUTH (toward vehicle) at 0.8 m/s.
+# Expected: cruise -> slow (<4 m) -> stop (~1.5 m gap), zero contact.
+# Lane x=12.5, y 4.5 -> -0.5 is C8R-validated open corridor.
+scenario_name: "scenario_autonomy_stop"
+description: "S3 human approaching from ahead; camera-only autonomy must slow and stop"
+vehicle_start_pose: [12.5, 4.5, 0.35, -1.5708]
+is_realistic: true
+is_real_human: true
+navmesh_enabled: false
+pedestrian_realism: real_human_s3
+pedestrians:
+  - pedestrian_id: "person_approach_ahead"
+    type: "approaching"
+    initial_position: [12.5, 0.5, 0.0]
+    initial_orientation: -1.5708
+    velocity: 0.6
+    trajectory_duration: 20.0
+    variant_idx: 1
+    animation: walk
+    is_realistic: true
+    is_real_human: true
+    use_real_human: true
+    destination: [12.5, -3.0, 0.0]
+static_obstacles: []
+environment_region: "center"
+expected_interaction_area:
+  min_x: 10.0
+  max_x: 14.0
+  min_y: -4.0
+  max_y: 6.0
+random_seed: 7

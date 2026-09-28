@@ -1,0 +1,144 @@
+# Simulation Configuration
+# Global simulation settings for Isaac Sim
+
+simulation:
+  # Physics settings
+  physics:
+    # Time stepping
+    dt: 0.01              # s - physics timestep (100 Hz)
+    substeps: 2           # physics sub-steps per frame
+    
+    # Solver
+    solver_type: "TGS"    # TGS (Temporal Gauss-Seidel) or PGS
+    solver_iterations: 16  # solver iterations to eliminate contact chatter
+    
+    # Gravity
+    gravity: [0.0, 0.0, -9.81]  # m/s²
+    
+    # Contact
+    contact_offset: 0.005     # m - contact offset
+    rest_offset: 0.001        # m - rest offset
+    
+    # Bounce
+    bounce_threshold: 0.2     # m/s - velocity threshold for bounce
+    
+    # Friction
+    default_friction: 0.6     # default friction coefficient
+    
+  # Rendering settings
+  rendering:
+    # Render mode
+    render_mode: "raytraced_lighting"  # or "path_tracing", "rasterization"
+    
+    # RTX settings
+    enable_rtx: true
+    samples_per_pixel: 4
+    max_bounces: 4
+    
+    # Camera
+    enable_camera: true
+    
+    # Performance
+    headless: true        # run without GUI (for CI/automation)
+    livestream: false     # enable WebRTC livestream
+  
+  # Stage settings
+  stage:
+    # Units
+    meters_per_unit: 1.0
+    kilograms_per_unit: 1.0
+    seconds_per_unit: 1.0
+    
+    # Up axis
+    up_axis: "Z"
+    
+    # Default prim
+    default_prim: "/World"
+  
+  # ROS 2 Bridge settings
+  ros2_bridge:
+    enabled: true
+    # ROS 2 domain ID (0-232)
+    domain_id: 0
+    
+    # Clock publication
+    publish_clock: true
+    clock_topic: "/clock"
+    
+    # TF publication
+    publish_tf: true
+    tf_topic: "/tf"
+    tf_static_topic: "/tf_static"
+    
+    # Use simulation time
+    use_sim_time: true
+    
+    # QoS settings
+    qos:
+      reliability: "reliable"  # "reliable" or "best_effort"
+      durability: "volatile"   # "volatile" or "transient_local"
+      history: "keep_last"
+      depth: 10
+  
+  # Scene settings
+  scene:
+    # Environment
+    environment_path: "isaac_sim/environments/lab/lab.usd"
+    
+    # Vehicle
+    vehicle_path: "isaac_sim/robots/vehicle/vehicle.usd"
+    
+    # Ground plane
+    ground_plane:
+      enabled: true
+      size: 100.0  # m - size of ground plane
+      color: [0.5, 0.5, 0.5, 1.0]  # gray
+  
+  # Experiment settings
+  experiment:
+    # Default scenario
+    default_scenario: "scenarios/scenario_01_empty.yaml"
+    
+    # Recording
+    record_data: false
+    data_dir: "data/"
+    
+    # Duration
+    max_simulation_time: 60.0  # s - max time per scenario
+    
+    # Random seed for reproducibility
+    random_seed: 42
+  
+  # Asset paths (relative to project root)
+  assets:
+    vehicles_dir: "isaac_sim/robots/vehicle/"
+    environments_dir: "isaac_sim/environments/"
+    sensors_dir: "isaac_sim/sensors/"
+    scenarios_dir: "scenarios/"
+  
+  # Isaac Sim specific
+  isaac_sim:
+    # Extensions to enable
+    extensions:
+      - "isaacsim.ros2.bridge"
+      - "isaacsim.sensors.camera"
+      - "isaacsim.robot.wheeled_robots"
+      - "isaacsim.core.api"
+    
+    # App config
+    app_config: "isaacsim.exp.full"  # or "isaacsim.exp.base.python"
+    
+    # Headless rendering
+    headless_rendering: true
+    
+    # GPU
+    gpu_device: 0
+
+# Source of parameters:
+# - physics dt/substeps: CONFIGURABLE (50-120 Hz typical)
+# - gravity: STANDARD (9.81 m/s²)
+# - rendering: CONFIGURABLE (headless=true for automation)
+# - ros2_bridge: CONFIGURABLE (domain_id=0 default)
+# - scene paths: PROJECT STRUCTURE (to be created)
+# - experiment: CONFIGURABLE per experiment
+# - isaac_sim extensions: REQUIRED for this project

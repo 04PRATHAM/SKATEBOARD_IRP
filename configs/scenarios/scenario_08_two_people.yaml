@@ -1,0 +1,68 @@
+# UPDATED 2026-09-16 — Realistic Human Pedestrian Upgrade
+# Changes: added is_realistic=true, navmesh_enabled=true, variant_idx (clothing variation),
+# animation (idle/walk), destination (NavMesh target), wait_time, pedestrian_realism.
+# Why: capsule placeholders → segmented human (head/torso/arms/legs/shoes) with
+# skeletal-like limb animation and per-pedestrian clothing/height variation,
+# visible from RGB-D, feet on floor, no float/sink/jitter. See docs/PROJECT_STRUCTURE.md
+# and ISAAC_SIM_LEARNING_AND_PROJECT_GUIDE.md § Realistic Pedestrians for details.
+scenario_name: scenario_08_two_people
+description: Two stationary people at different locations
+vehicle_start_pose:
+- 6.0
+- -6.0
+- 0.35
+- 0.0
+pedestrians:
+- pedestrian_id: person_08a
+  type: stationary
+  initial_position:
+  - 10.0
+  - -4.0
+  - 0.0
+  initial_orientation: 3.14159
+  velocity: 0.0
+  trajectory_duration: 30.0
+  start_delay: 0.0
+  height: 1.75
+  shoulder_width: 0.45
+  capsule_radius: 0.22
+  color:
+  - 0.2
+  - 0.5
+  - 0.8
+  variant_idx: 3
+  animation: idle
+  is_realistic: true
+  wait_time: 0.0
+- pedestrian_id: person_08b
+  type: stationary
+  initial_position:
+  - 14.0
+  - -8.0
+  - 0.0
+  initial_orientation: 2.0
+  velocity: 0.0
+  trajectory_duration: 30.0
+  start_delay: 0.0
+  height: 1.7
+  shoulder_width: 0.42
+  capsule_radius: 0.21
+  color:
+  - 0.5
+  - 0.3
+  - 0.7
+  variant_idx: 4
+  animation: idle
+  is_realistic: true
+  wait_time: 0.0
+static_obstacles: []
+environment_region: multi_person
+expected_interaction_area:
+  min_x: 8.0
+  max_x: 16.0
+  min_y: -10.0
+  max_y: -2.0
+random_seed: 42
+is_realistic: true
+navmesh_enabled: true
+pedestrian_realism: realistic_human_segmented

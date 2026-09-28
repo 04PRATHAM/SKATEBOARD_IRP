@@ -1,0 +1,48 @@
+scenario_name: scenario_04_person_approaching
+description: "Realistic human approaching vehicle from ahead \u2014 walking toward\
+  \ vehicle, natural posture"
+vehicle_start_pose:
+- 6.0
+- -6.0
+- 0.35
+- 0.0
+is_realistic: true
+navmesh_enabled: true
+pedestrian_realism: real_human_s3
+pedestrians:
+- pedestrian_id: approaching_person_01
+  type: approaching
+  initial_position:
+  - 20.0
+  - -6.0
+  - 0.0
+  initial_orientation: 3.14159
+  velocity: 1.0
+  trajectory_duration: 15.0
+  start_delay: 1.0
+  wait_time: 1.0
+  height: 1.75
+  shoulder_width: 0.45
+  capsule_radius: 0.22
+  color:
+  - 0.45
+  - 0.3
+  - 0.65
+  variant_idx: 4
+  animation: walk
+  is_realistic: true
+  destination:
+  - 5.0
+  - -6.0
+  - 0.0
+  is_real_human: true
+  use_real_human: true
+static_obstacles: []
+environment_region: approach_zone
+expected_interaction_area:
+  min_x: 6.0
+  max_x: 22.0
+  min_y: -7.0
+  max_y: -5.0
+random_seed: 42
+is_real_human: true

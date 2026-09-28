@@ -1,0 +1,94 @@
+# RGB-D Camera Configuration
+# All parameters are CONFIGURABLE and should match the real sensor when available
+# Values marked as ESTIMATED are from typical RGB-D cameras (e.g., Intel RealSense D435)
+
+camera:
+  # Image resolution (CONFIGURABLE - match real sensor)
+  image_width: 640      # pixels - RGB width
+  image_height: 480     # pixels - RGB height
+  
+  # Depth resolution (may differ from RGB)
+  depth_width: 640      # pixels - depth width
+  depth_height: 480     # pixels - depth height
+  
+  # Field of view (CONFIGURABLE - match real sensor)
+  horizontal_fov: 1.22  # rad (~70 deg) - horizontal FOV
+  vertical_fov: 0.79    # rad (~45 deg) - vertical FOV
+  
+  # Depth range (CONFIGURABLE - match real sensor)
+  near_clip: 0.1        # m - minimum depth distance
+  far_clip: 10.0        # m - maximum depth distance
+  
+  # Frame rate (CONFIGURABLE)
+  frame_rate: 30        # Hz - camera frame rate
+  
+  # Camera position on vehicle (ESTIMATED from photos)
+  # Relative to VEHICLE ROOT (chassis center, NOT rear axle): must equal
+  # vehicle.yaml camera_mount_x/z so the sensor sits on the riser post.
+  position_x: 0.9       # m - forward of chassis center (on top of riser post)
+  position_y: 0.0       # m - lateral offset (center)
+  position_z: 1.2       # m - height from ground
+  
+  # Camera orientation (ESTIMATED from photos)
+  roll: 0.0             # rad - no roll
+  pitch: -0.15          # rad - slight downward tilt (~ -8.5 deg)
+  yaw: 0.0              # rad - facing forward
+  
+  # ROS 2 Topics (CONFIGURABLE)
+  rgb_topic: "/camera/rgb/image_raw"
+  depth_topic: "/camera/depth/image_raw"
+  rgb_camera_info_topic: "/camera/rgb/camera_info"
+  depth_camera_info_topic: "/camera/depth/camera_info"
+  
+  # TF Frame names (CONFIGURABLE - follow ROS conventions)
+  camera_frame: "camera_link"
+  rgb_optical_frame: "camera_rgb_optical_frame"
+  depth_optical_frame: "camera_depth_optical_frame"
+  
+  # Camera calibration (PLACEHOLDER - replace with real calibration)
+  # These will be published in CameraInfo messages
+  rgb_camera_matrix:
+    fx: 500.0   # focal length x (pixels) - ESTIMATED
+    fy: 500.0   # focal length y (pixels) - ESTIMATED
+    cx: 320.0   # principal point x (pixels) - ESTIMATED (image_width/2)
+    cy: 240.0   # principal point y (pixels) - ESTIMATED (image_height/2)
+  
+  depth_camera_matrix:
+    fx: 500.0   # focal length x (pixels) - ESTIMATED (typically similar to RGB)
+    fy: 500.0   # focal length y (pixels) - ESTIMATED
+    cx: 320.0   # principal point x (pixels) - ESTIMATED
+    cy: 240.0   # principal point y (pixels) - ESTIMATED
+  
+  # Distortion coefficients (PLACEHOLDER - set to zero for simulation)
+  # k1, k2, p1, p2, k3
+  distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
+  
+  # RGB/Depth alignment (CONFIGURABLE)
+  # If true, depth is aligned to RGB image (registered depth)
+  # If false, depth is in native depth camera frame
+  align_depth_to_rgb: true
+  
+  # Depth units and format
+  depth_scale: 1.0      # meters per depth unit (1.0 for meters)
+  depth_format: "32FC1" # depth image encoding
+  
+  # Isaac Sim specific
+  # These map to Isaac Sim camera prim properties
+  enable_rgb: true
+  enable_depth: true
+  enable_semantic: false
+  enable_instance: false
+  
+  # Rendering
+  clipping_range: [0.1, 10.0]  # [near, far]
+  
+# Source of parameters:
+# - image_width/height: CONFIGURABLE (typical: 640x480, 1280x720)
+# - fov: CONFIGURABLE (typical RGB-D: 60-90 deg horizontal)
+# - near/far_clip: CONFIGURABLE (typical: 0.1-10m)
+# - frame_rate: CONFIGURABLE (typical: 15-30 Hz)
+# - position/orientation: ESTIMATED from reference photographs
+# - camera_matrix: ESTIMATED (use real calibration when available)
+# - distortion: PLACEHOLDER (use real calibration when available)
+# - topics/frames: CONFIGURABLE (follow ROS conventions)
+# - align_depth_to_rgb: CONFIGURABLE (true for most RGB-D use cases)

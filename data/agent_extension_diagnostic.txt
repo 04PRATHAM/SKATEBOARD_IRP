@@ -1,0 +1,146 @@
+
+==============================================================================
+SKATEBOARD_IRP — Isaac Sim Agent/People/Character Extension Diagnostic
+==============================================================================
+Timestamp : 2026-09-17T15:03:41.520241
+Isaac Sim : 5.1.0-rc.19+release.26219.9c81211b.gl
+Python    : 3.11.13
+
+==============================================================================
+STEP A/B/C — Extension existence + manifest + dependency registry
+==============================================================================
+[FOUND]   omni.usd.schema.anim                   version=(0, 0, 0, '', '69cbf6ad.lx64.r.cp311') enabled=True
+            path: /home/ubuntu/isaacsim/extscache/omni.usd.schema.anim-0.0.0+69cbf6ad.lx64.r.cp311
+[FOUND]   omni.anim.graph.schema                 version=(107, 3, 3, '', '107.3.3.lx64.r.cp311.u353') enabled=True
+            path: /home/ubuntu/isaacsim/extscache/omni.anim.graph.schema-107.3.3+107.3.3.lx64.r.cp311.u353
+[FOUND]   omni.anim.navigation.schema            version=(107, 3, 3, '', '107.3.3.lx64.r.cp311.u353') enabled=True
+            path: /home/ubuntu/isaacsim/extscache/omni.anim.navigation.schema-107.3.3+107.3.3.lx64.r.cp311.u353
+[FOUND]   omni.anim.retarget.core                version=(107, 3, 3, '', '107.3.3.lx64.r.cp311.u353') enabled=False
+            path: /home/ubuntu/isaacsim/extscache/omni.anim.retarget.core-107.3.3+107.3.3.lx64.r.cp311.u353
+[FOUND]   omni.anim.graph.core                   version=(107, 3, 4, '', '107.3.3.lx64.r.cp311.u353') enabled=False
+            path: /home/ubuntu/isaacsim/extscache/omni.anim.graph.core-107.3.4+107.3.3.lx64.r.cp311.u353
+[FOUND]   omni.anim.navigation.core              version=(107, 3, 8, '', '107.3.3.lx64.r.cp311.u353') enabled=False
+            path: /home/ubuntu/isaacsim/extscache/omni.anim.navigation.core-107.3.8+107.3.3.lx64.r.cp311.u353
+[FOUND]   omni.metropolis.utils                  version=(0, 1, 20, '', '107.3.3.lx64.cp311') enabled=False
+            path: /home/ubuntu/isaacsim/extscache/omni.metropolis.utils-0.1.20+107.3.3.lx64.cp311
+[FOUND]   omni.kit.scripting                     version=(107, 3, 2, '', '107.3.2') enabled=True
+            path: /home/ubuntu/isaacsim/extscache/omni.kit.scripting-107.3.2+107.3.2
+[FOUND]   omni.anim.people                       version=(0, 7, 9, '', '107.3.3') enabled=False
+            path: /home/ubuntu/isaacsim/extscache/omni.anim.people-0.7.9+107.3.3
+[FOUND]   isaacsim.anim.robot                    version=(0, 0, 15, '', '107.3.3') enabled=False
+            path: /home/ubuntu/isaacsim/extscache/isaacsim.anim.robot-0.0.15+107.3.3
+[FOUND]   isaacsim.replicator.agent.core         version=(0, 7, 28, '', '107.3.3') enabled=False
+            path: /home/ubuntu/isaacsim/extscache/isaacsim.replicator.agent.core-0.7.28+107.3.3
+
+==============================================================================
+STEP D — Enabling extensions via Kit extension manager
+==============================================================================
+[ENABLE-OK]   omni.usd.schema.anim
+[ENABLE-OK]   omni.anim.graph.schema
+[ENABLE-OK]   omni.anim.navigation.schema
+[ENABLE-OK]   omni.anim.retarget.core
+[ENABLE-OK]   omni.anim.graph.core
+[ENABLE-OK]   omni.anim.navigation.core
+[ENABLE-OK]   omni.metropolis.utils
+[ENABLE-OK]   omni.kit.scripting
+[ENABLE-OK]   omni.anim.people
+[ENABLE-OK]   isaacsim.anim.robot
+[ENABLE-OK]   isaacsim.replicator.agent.core
+
+==============================================================================
+STEP E — Enabled state confirmed by extension manager
+==============================================================================
+[ENABLED ] omni.usd.schema.anim
+[ENABLED ] omni.anim.graph.schema
+[ENABLED ] omni.anim.navigation.schema
+[ENABLED ] omni.anim.retarget.core
+[ENABLED ] omni.anim.graph.core
+[ENABLED ] omni.anim.navigation.core
+[ENABLED ] omni.metropolis.utils
+[ENABLED ] omni.kit.scripting
+[ENABLED ] omni.anim.people
+[ENABLED ] isaacsim.anim.robot
+[ENABLED ] isaacsim.replicator.agent.core
+
+==============================================================================
+STEP F — Python module import AFTER enable (the real test)
+==============================================================================
+[IMPORT-OK]   omni.anim.graph.core
+[IMPORT-OK]   omni.anim.navigation.core
+[IMPORT-OK]   omni.anim.retarget.core
+[IMPORT-OK]   omni.anim.people
+[IMPORT-OK]   omni.anim.people.scripts.navigation_manager
+[IMPORT-OK]   omni.anim.people.scripts.character_behavior
+[IMPORT-OK]   omni.metropolis.utils
+[IMPORT-OK]   isaacsim.replicator.agent.core
+[IMPORT-OK]   AnimGraphSchema
+
+==============================================================================
+ASSET ROOT — Isaac Sim asset root (Nucleus / S3 / local)
+==============================================================================
+get_assets_root_path() = https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1
+
+==============================================================================
+CHARACTER ASSETS — availability check (omni.client.stat)
+==============================================================================
+[OK ] Biped_Setup.usd              https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/People/Characters/Biped_Setup.usd (size=20958)
+[OK ] male_adult_construction_01   https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/People/Characters/original_male_adult_construction_01/male_adult_construction_01.usd (size=547589)
+[OK ] F_Business_02                https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/People/Characters/F_Business_02/F_Business_02.usd (size=728407)
+
+Character catalog under https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1/Isaac/People/Characters (25 entries):
+   - .thumbs
+   - Biped_Setup.usd
+   - F_Business_02
+   - F_Medical_01
+   - M_Medical_01
+   - biped_demo
+   - female_adult_police_01_new
+   - female_adult_police_02
+   - female_adult_police_03_new
+   - filter.json
+   - male_adult_construction_01_new
+   - male_adult_construction_03
+   - male_adult_construction_05_new
+   - male_adult_police_04
+   - original_female_adult_business_02
+   - original_female_adult_medical_01
+   - original_female_adult_police_01
+   - original_female_adult_police_02
+   - original_female_adult_police_03
+   - original_male_adult_construction_01
+   - original_male_adult_construction_02
+   - original_male_adult_construction_03
+   - original_male_adult_construction_05
+   - original_male_adult_medical_01
+   - original_male_adult_police_04
+
+==============================================================================
+MOTION LIBRARY — local retarget Human rig + anim graph
+==============================================================================
+omni.anim.retarget.core path: /home/ubuntu/isaacsim/extscache/omni.anim.retarget.core-107.3.3+107.3.3.lx64.r.cp311.u353
+   - /home/ubuntu/isaacsim/extscache/omni.anim.retarget.core-107.3.3+107.3.3.lx64.r.cp311.u353/data/rigs/Human/assets/human_skeleton.usd
+   - /home/ubuntu/isaacsim/extscache/omni.anim.retarget.core-107.3.3+107.3.3.lx64.r.cp311.u353/data/rigs/Human/assets/idle.skelanim.usd
+   - /home/ubuntu/isaacsim/extscache/omni.anim.retarget.core-107.3.3+107.3.3.lx64.r.cp311.u353/data/rigs/Human/assets/walk.skelanim.usd
+   - /home/ubuntu/isaacsim/extscache/omni.anim.retarget.core-107.3.3+107.3.3.lx64.r.cp311.u353/data/rigs/Human/assets/wave.skelanim.usd
+
+==============================================================================
+NAVIGATION — NavMesh interface availability
+==============================================================================
+nav.acquire_interface() = <omni.anim.navigation.core.bindings._omni_anim_navigation_core.INavigation object at 0x77e508dcdeb0>
+NavMesh interface acquired OK (methods: cancel_navmesh_baking, clear_cache_dir, create_area, destroy_area, find_area, get_area_color, get_area_colors, get_area_count, get_area_default_cost, get_area_name, get_area_names, get_cache_dir, get_navmesh, get_navmesh_event_stream, is_navmesh_baking, set_area_color, set_area_default_cost, set_area_name, set_random_seed, start_navmesh_baking)
+
+==============================================================================
+ANIMATION GRAPH — omni.anim.graph.core interface
+==============================================================================
+omni.anim.graph.core public API: ANIM_GRAPH_EXTERNAL, AnimGraphSchema, Animation, ApplyAnimationGraphAPICommand, Character, CharacterAnimator, CompileEvent, CompileEventType, CreateAnimationGraphCommand, EVENT_TYPE_ANIMATION_BLEND_IN_COMPLETE, EVENT_TYPE_ANIMATION_BLEND_OUT_START, EVENT_TYPE_ANIMATION_END, EVENT_TYPE_ANIMATION_LOOP, IAnimGraph, List, Path, PublicExtension, RemoveAnimationGraphAPICommand, RenameAnimationGraphVariableAttributeCommand, Sdf, SetAnimationGraphVariableAttributeTypeCommand, SetAnimationGraphVariableDescriptionCommand, Usd, UsdLayerUndo, VariablesService, acquire_interface, ag, bindings, command, extension
+get_character present: True
+
+==============================================================================
+VERDICT
+==============================================================================
+omni.anim.people enabled+imported : True
+omni.anim.graph.core imported     : True
+omni.anim.navigation.core imported: True
+asset root resolved               : True (https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1)
+
+REAL HUMAN CHARACTER SYSTEM USABLE: YES

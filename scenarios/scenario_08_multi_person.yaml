@@ -1,0 +1,55 @@
+# Scenario 08 — Multiple Realistic Humans (3 distinct people, per task PART 10)
+# Verifies: 3 S3 SkelRoot characters with distinct appearances (variant_idx 0,1,2)
+#           not colliding with each other, visible from RGB-D, varied clothing,
+#           at least one walking and one standing (mixed)
+scenario_name: "scenario_08_multi_person"
+description: "Three visually distinct REAL human characters (SkelRoot skinned mesh + skeleton) — 1 static + 2 walking, varied clothing, in lab"
+vehicle_start_pose: [6.0, -6.0, 0.35, 0.0]
+is_realistic: true
+is_real_human: true
+navmesh_enabled: true
+pedestrian_realism: real_human_s3
+pedestrians:
+  - pedestrian_id: "person_static_01"
+    type: "stationary"
+    initial_position: [0.0, -2.0, 0.0]
+    initial_orientation: 0.0
+    velocity: 0.0
+    trajectory_duration: 30.0
+    variant_idx: 0          # construction_male_01 (orange vest, helmet)
+    animation: idle
+    is_realistic: true
+    is_real_human: true
+    use_real_human: true
+  - pedestrian_id: "person_walk_01"
+    type: "walking_straight"
+    initial_position: [2.0, -8.0, 0.0]
+    initial_orientation: 0.0
+    velocity: 1.0
+    trajectory_duration: 15.0
+    variant_idx: 1          # business_female_02 (suit)
+    animation: walk
+    is_realistic: true
+    is_real_human: true
+    use_real_human: true
+    destination: [12.0, -8.0, 0.0]
+  - pedestrian_id: "person_walk_02"
+    type: "walking_straight"
+    initial_position: [-6.0, 3.0, 0.0]
+    initial_orientation: 0.785  # 45 deg
+    velocity: 1.2
+    trajectory_duration: 15.0
+    variant_idx: 2          # medical_female_01 (lab coat)
+    animation: walk
+    is_realistic: true
+    is_real_human: true
+    use_real_human: true
+    destination: [4.0, 10.0, 0.0]
+static_obstacles: []
+environment_region: "center"
+expected_interaction_area:
+  min_x: -8.0
+  max_x: 14.0
+  min_y: -10.0
+  max_y: 12.0
+random_seed: 42

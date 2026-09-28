@@ -1,0 +1,68 @@
+# Vehicle Configuration
+# All dimensions are ESTIMATED from reference photographs
+# unless marked as MEASURED
+# Values marked as CONFIGURABLE should be adjusted per experiment
+
+vehicle:
+  # Overall dimensions (ESTIMATED from photographs)
+  length: 1.8       # m - overall vehicle length
+  width: 1.2        # m - overall vehicle width
+  height: 0.4       # m - chassis height from ground (low platform)
+  
+  # Wheelbase and track (ESTIMATED: narrow track per spec, ≈1.0 m.
+  # Changed 1.16 -> 1.0 on 2026-09-09: rebuild spec mandates ≈1.0 m narrow
+  # track; outboard stance is achieved by tire width, not wider joints.)
+  wheelbase: 1.1    # m - distance between front and rear axles
+  front_track: 1.0  # m - distance between front wheels
+  rear_track: 1.0   # m - distance between rear wheels
+  
+  # Wheel dimensions (ESTIMATED)
+  wheel_radius: 0.25    # m - wheel radius (large wheels visible in photos)
+  wheel_width: 0.18     # m - wheel width
+  
+  # Ground clearance (ESTIMATED)
+  ground_clearance: 0.15  # m - relatively high clearance visible
+  
+  # Chassis (120 kg + 4x7.5 kg wheels = 150 kg total, per simulation_world_plan.md)
+  chassis_mass: 120.0     # kg - estimated mass (CONFIGURABLE)
+  chassis_inertia_x: 20.0  # kg·m² - estimated
+  chassis_inertia_y: 50.0  # kg·m² - estimated
+  chassis_inertia_z: 60.0  # kg·m² - estimated
+  
+  # Steering (Ackermann geometry)
+  max_steering_angle: 0.6   # rad (~34 deg) - max front wheel angle
+  steering_rate: 2.0        # rad/s - max steering angular velocity
+  ackermann_accuracy: 0.95  # Ackermann geometry factor (0-1)
+  
+  # Performance limits (CONFIGURABLE)
+  max_speed: 2.0      # m/s - max forward speed
+  max_reverse_speed: 1.0  # m/s - max reverse speed
+  max_acceleration: 1.5   # m/s² - max acceleration
+  max_deceleration: 3.0   # m/s² - max braking
+  
+  # Wheel friction (CONFIGURABLE)
+  wheel_friction: 0.8     # lateral friction coefficient
+  wheel_longitudinal_friction: 0.9  # longitudinal friction
+  
+  # Sensor mounting (ESTIMATED from photos - camera on front)
+  camera_mount_x: 0.9     # m - forward from rear axle
+  camera_mount_y: 0.0     # m - lateral offset (center)
+  camera_mount_z: 1.2     # m - height from ground
+  camera_pitch: -0.15     # rad - slight downward tilt (~ -8.5 deg)
+  camera_pitch_deg: -8.5  # deg - for visual_vehicle.py
+  
+  # Visual geometry (for simulation appearance)
+  visual:
+    chassis_color: [0.1, 0.1, 0.1, 1.0]  # dark/black frame
+    wheel_rim_color: [0.9, 0.9, 0.9, 1.0]  # light/white rims
+    seat_color: [0.6, 0.4, 0.2, 1.0]  # brown/tan seat
+    
+# Source of dimensions:
+# - length, width, height: ESTIMATED from reference photographs
+# - wheelbase, tracks: ESTIMATED from reference photographs  
+# - wheel_radius, wheel_width: ESTIMATED from reference photographs
+# - ground_clearance: ESTIMATED from reference photographs
+# - chassis_mass: ASSUMED (no measurement available)
+# - max_steering_angle: ASSUMED (typical for small vehicle)
+# - max_speed, acceleration: CONFIGURABLE for experiments
+# - camera_mount_*: ESTIMATED from reference photographs

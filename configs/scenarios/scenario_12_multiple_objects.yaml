@@ -1,0 +1,130 @@
+# UPDATED 2026-09-16 — Realistic Human Pedestrian Upgrade
+# Changes: added is_realistic=true, navmesh_enabled=true, variant_idx (clothing variation),
+# animation (idle/walk), destination (NavMesh target), wait_time, pedestrian_realism.
+# Why: capsule placeholders → segmented human (head/torso/arms/legs/shoes) with
+# skeletal-like limb animation and per-pedestrian clothing/height variation,
+# visible from RGB-D, feet on floor, no float/sink/jitter. See docs/PROJECT_STRUCTURE.md
+# and ISAAC_SIM_LEARNING_AND_PROJECT_GUIDE.md § Realistic Pedestrians for details.
+scenario_name: scenario_12_multiple_objects
+description: Multiple pedestrians and static obstacles in scene
+vehicle_start_pose:
+- 6.0
+- -6.0
+- 0.35
+- 0.0
+pedestrians:
+- pedestrian_id: person_12a
+  type: stationary
+  initial_position:
+  - 8.0
+  - -3.0
+  - 0.0
+  initial_orientation: 3.14159
+  velocity: 0.0
+  trajectory_duration: 40.0
+  start_delay: 0.0
+  height: 1.75
+  shoulder_width: 0.45
+  capsule_radius: 0.22
+  color:
+  - 0.2
+  - 0.7
+  - 0.5
+  variant_idx: 3
+  animation: idle
+  is_realistic: true
+  wait_time: 0.0
+- pedestrian_id: person_12b
+  type: crossing_left_to_right
+  initial_position:
+  - 14.0
+  - -10.0
+  - 0.0
+  initial_orientation: 1.5708
+  velocity: 1.0
+  trajectory_duration: 20.0
+  start_delay: 3.0
+  height: 1.7
+  shoulder_width: 0.42
+  capsule_radius: 0.21
+  color:
+  - 0.7
+  - 0.3
+  - 0.8
+  variant_idx: 4
+  animation: walk
+  is_realistic: true
+  wait_time: 3.0
+  destination:
+  - 14.0
+  - 10.0
+  - 0.0
+- pedestrian_id: person_12c
+  type: approaching
+  initial_position:
+  - 22.0
+  - -6.0
+  - 0.0
+  initial_orientation: 3.14159
+  velocity: 0.8
+  trajectory_duration: 30.0
+  start_delay: 5.0
+  height: 1.8
+  shoulder_width: 0.48
+  capsule_radius: 0.23
+  color:
+  - 0.4
+  - 0.8
+  - 0.3
+  variant_idx: 5
+  animation: walk
+  is_realistic: true
+  wait_time: 5.0
+  destination:
+  - -2.0
+  - -6.0
+  - 0.0
+static_obstacles:
+- object_type: chair
+  object_id: chair_12a
+  position:
+  - -6.5
+  - -10.5
+  - 0.0
+  orientation: 0.0
+  dimensions:
+  - 0.5
+  - 0.5
+  - 1.0
+- object_type: table
+  object_id: table_12a
+  position:
+  - 0.0
+  - 0.0
+  - 0.0
+  orientation: 0.0
+  dimensions:
+  - 2.4
+  - 1.2
+  - 0.75
+- object_type: column
+  object_id: column_12a
+  position:
+  - -10.0
+  - -8.0
+  - 0.0
+  orientation: 0.0
+  dimensions:
+  - 0.6
+  - 0.6
+  - 3.5
+environment_region: complex_scene
+expected_interaction_area:
+  min_x: -12.0
+  max_x: 24.0
+  min_y: -12.0
+  max_y: 2.0
+random_seed: 42
+is_realistic: true
+navmesh_enabled: true
+pedestrian_realism: realistic_human_segmented

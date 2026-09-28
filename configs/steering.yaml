@@ -1,0 +1,89 @@
+# Steering Controller Configuration
+# Parameters for the Ackermann steering controller
+
+steering:
+  # Vehicle geometry (should match vehicle.yaml)
+  wheelbase: 1.1        # m - distance between front and rear axles
+  front_track: 1.0      # m - distance between front wheels
+  rear_track: 1.0       # m - distance between rear wheels
+  
+  # Steering limits
+  max_steering_angle: 0.6   # rad (~34 deg) - max front wheel angle
+  min_steering_angle: -0.6  # rad - min front wheel angle
+  max_steering_rate: 2.0    # rad/s - max steering angular velocity
+  
+  # Speed limits
+  max_speed: 2.0          # m/s - max forward speed
+  min_speed: 0.0          # m/s - min speed (0 for no reverse)
+  max_reverse_speed: 1.0  # m/s - max reverse speed
+  max_acceleration: 1.5   # m/s²
+  max_deceleration: 3.0   # m/s²
+  
+  # Ackermann geometry
+  # For perfect Ackermann: inner_wheel_angle = atan(wheelbase / (turning_radius - track/2))
+  # outer_wheel_angle = atan(wheelbase / (turning_radius + track/2))
+  # This factor allows tuning (1.0 = perfect Ackermann)
+  ackermann_factor: 1.0
+  
+  # Controller gains (for PID or similar)
+  steering_pid:
+    kp: 1.0      # proportional gain
+    ki: 0.0      # integral gain
+    kd: 0.1      # derivative gain
+    max_integral: 0.5  # anti-windup
+  
+  speed_pid:
+    kp: 2.0
+    ki: 0.5
+    kd: 0.1
+    max_integral: 1.0
+  
+  # Safety / obstacle avoidance
+  safety:
+    # Emergency stop distance
+    emergency_stop_distance: 0.5   # m - stop if obstacle closer
+    
+    # Slow down distance
+    slow_down_distance: 2.0        # m - reduce speed if obstacle closer
+    
+    # Lateral clearance
+    min_lateral_clearance: 0.5     # m - minimum side clearance
+    
+    # Person-specific distances (more conservative)
+    person_emergency_stop_distance: 1.0   # m
+    person_slow_down_distance: 3.0        # m
+    person_min_lateral_clearance: 1.0     # m
+  
+  # ROS 2 Topics
+  topics:
+    # Command input (from steering decision node)
+    cmd_topic: "/cmd_ackermann"
+    cmd_msg_type: "ackermann_msgs/msg/AckermannDriveStamped"
+    
+    # Vehicle state feedback
+    odom_topic: "/odom"
+    odom_msg_type: "nav_msgs/msg/Odometry"
+    
+    # TF
+    base_frame: "base_link"
+    odom_frame: "odom"
+  
+  # Control loop
+  control_rate: 50.0  # Hz - control loop frequency
+  
+  # Command timeout
+  cmd_timeout: 0.5  # s - stop if no command received
+  
+  # Smoothing
+  steering_smoothing: 0.1  # smoothing factor (0-1, higher = smoother)
+  speed_smoothing: 0.1
+  
+# Source of parameters:
+# - wheelbase/track: FROM vehicle.yaml (should be synchronized)
+# - max_steering_angle: FROM vehicle.yaml
+# - max_speed/acceleration: FROM vehicle.yaml
+# - ackermann_factor: CONFIGURABLE (1.0 = perfect Ackermann)
+# - PID gains: CONFIGURABLE (tune per vehicle)
+# - safety distances: CONFIGURABLE (experiment dependent)
+# - topics: CONFIGURABLE (follow ROS conventions)
+# - control_rate: CONFIGURABLE (match physics dt)
