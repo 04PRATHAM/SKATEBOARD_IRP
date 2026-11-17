@@ -25,8 +25,11 @@ def create_vehicle_visuals(vehicle_path: str, vehicle_cfg: dict):
         vehicle_path: USD path to vehicle root (e.g., "/World/Vehicle")
         vehicle_cfg: Vehicle configuration dictionary
     """
+    # pyrefly: ignore [missing-import]
     from pxr import Usd, UsdGeom, Gf, Sdf
+    # pyrefly: ignore [missing-import]
     import omni.usd
+    # pyrefly: ignore [missing-import]
     from isaacsim.core.utils.prims import define_prim, get_prim_at_path
     
     stage = omni.usd.get_context().get_stage()

@@ -85,3 +85,15 @@ multi_object_steering_sim/
 - The simulation is a **compulsory and major** part of the project, not optional visualization
 - The sensor is an RGB + DEPTH camera (RGB-D)
 - The final architecture supports: RGB + Depth -> ROS 2 -> Perception -> Multi-object reasoning -> Steering decision -> Vehicle controller -> Isaac Sim vehicle
+<<<<<<< HEAD- Do not create a generic TurtleBot.
+- Do not use differential drive unless justified.
+- Do not use LiDAR.
+- Do not make RGB or depth optional.
+- Do not hard-code dimensions or topic names.
+
+## Current State (2026-11-17)
+
+- **Humans:** Two explicit tiers: `s3` (real skinned S3 assets with graph animation) and `segmented` (primitive assembly for headless fallback). S3 failure raises an error rather than silently downgrading.
+- **Vehicle safety:** YAML scenarios hold the vehicle stationary by default through `vehicle_behavior`. The previous unconditional cruise caused a front-wall collision at t=16 seconds. See `docs/WALL_COLLISION_REPORT.md`.
+- **Perception:** YOLO26n-seg multi-class `[0,13,56,57,60]` has been standalone-verified. Class 60 is exposed as `table`, with class IDs unchanged. Live ROS RGB/depth is blocked by an Isaac Sim 5.1 Synthetic Data writer regression. See `docs/YOLO_PERCEPTION_VALIDATION_REPORT.md`.
+- **Not yet completed:** Live YOLO/fusion/Object3D processing on ROS topics, GUI visual sign-off, and autonomy.

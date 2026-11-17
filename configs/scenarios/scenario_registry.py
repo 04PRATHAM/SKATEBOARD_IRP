@@ -1,0 +1,1 @@
+/home/ubuntu/SKATEBOARD_IRP/isaac_sim/scripts/scenarios/scenario_registry.py

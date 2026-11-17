@@ -93,7 +93,12 @@ def setup_ros2_bridge(camera_prim_path: str, camera_cfg: dict, sim_cfg: dict,
     height = int(camera_cfg.get("image_height", 480))
     camera_mount_path = camera_prim_path.rsplit("/", 1)[0]  # .../Sensors/RGBD_Camera
 
-    # 2. Build the ActionGraph
+    # 2. Build the ActionGraph (if not already existing)
+    stage = omni.usd.get_context().get_stage()
+    if stage and stage.GetPrimAtPath(GRAPH_PATH).IsValid():
+        print(f"[INFO] ROS 2 bridge graph already exists at {GRAPH_PATH}.")
+        return GRAPH_PATH
+
     og.Controller.edit(
         {"graph_path": GRAPH_PATH, "evaluator_name": "execution"},
         {
@@ -107,6 +112,7 @@ def setup_ros2_bridge(camera_prim_path: str, camera_cfg: dict, sim_cfg: dict,
                 ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
                 ("Clock", "isaacsim.ros2.bridge.ROS2PublishClock"),
                 ("PublishTF", "isaacsim.ros2.bridge.ROS2PublishTransformTree"),
+                ("SubAckermann", "isaacsim.ros2.bridge.ROS2SubscribeAckermannDrive"),
             ],
             og.Controller.Keys.SET_VALUES: [
                 ("CreateRenderProduct.inputs:cameraPrim", [usdrt.Sdf.Path(camera_prim_path)]),
@@ -134,6 +140,8 @@ def setup_ros2_bridge(camera_prim_path: str, camera_cfg: dict, sim_cfg: dict,
                     usdrt.Sdf.Path(vehicle_path),
                     usdrt.Sdf.Path(camera_mount_path),
                 ]),
+
+                ("SubAckermann.inputs:topicName", "/cmd_ackermann"),
             ],
             og.Controller.Keys.CONNECT: [
                 # Render product fans out to all image/info publishers + TF
@@ -149,6 +157,7 @@ def setup_ros2_bridge(camera_prim_path: str, camera_cfg: dict, sim_cfg: dict,
                 ("CreateRenderProduct.outputs:renderProductPath", "DepthInfo.inputs:renderProductPath"),
                 # Sim-time clock
                 ("OnPlaybackTick.outputs:tick", "Clock.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "SubAckermann.inputs:execIn"),
                 ("ReadSimTime.outputs:simulationTime", "Clock.inputs:timeStamp"),
                 ("ReadSimTime.outputs:simulationTime", "PublishTF.inputs:timeStamp"),
             ],
@@ -162,6 +171,7 @@ def setup_ros2_bridge(camera_prim_path: str, camera_cfg: dict, sim_cfg: dict,
     print(f"  Depth info  -> {camera_cfg['depth_camera_info_topic']}")
     print(f"  Clock       -> {clock_topic}")
     print(f"  TF tree     -> {tf_topic} (frames under {vehicle_path})")
+    print(f"  Ackermann   <- /cmd_ackermann (subscribed via SubAckermann)")
     return GRAPH_PATH
 
 

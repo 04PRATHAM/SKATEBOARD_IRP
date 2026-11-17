@@ -1,0 +1,76 @@
+# Autonomous Point-to-Point Navigation Scenario
+# Start: (6.0, -6.0), Destination: (13.5, -6.0)
+# Contains:
+#   1. Unknown static obstacle (table) at (10.0, -5.7) partially obstructing path
+#   2. Dynamic pedestrian (S3 RealHuman with native OpenUSD walk & collision)
+#      crossing the path from (11.5, -4.5) to (11.5, -7.5) at 0.5 m/s
+
+scenario_name: scenario_autonomous_point_to_point
+description: >
+  Autonomous Ackermann point-to-point navigation across laboratory.
+  The vehicle starts at (6.0, -6.0) and must navigate to (13.5, -6.0)
+  while detecting unknown static obstacles and predicting dynamic pedestrian trajectories.
+
+vehicle_start_pose:
+  - 6.0    # x
+  - -6.0   # y
+  - 0.35   # z
+  - 0.0    # yaw (facing +X)
+
+vehicle_destination_pose:
+  - 13.5   # x
+  - -6.0   # y
+  - 0.0    # yaw
+
+pedestrians:
+  - pedestrian_id: person_crossing_01
+    type: crossing
+    initial_position:
+      - 11.5
+      - -4.5
+      - 0.0
+    initial_orientation: -1.5708  # facing -Y (crossing southwards)
+    velocity: 0.45
+    trajectory_duration: 25.0
+    start_delay: 2.0
+    height: 1.75
+    shoulder_width: 0.45
+    capsule_radius: 0.22
+    color:
+      - 0.2
+      - 0.4
+      - 0.8
+    variant_idx: 0
+    human_tier: s3
+    animation: walk
+    is_realistic: true
+    is_real_human: true
+    use_real_human: true
+    wait_time: 0.0
+    destination:
+      - 11.5
+      - -7.5
+      - 0.0
+
+static_obstacles:
+  - object_type: table
+    object_id: unknown_corridor_table
+    position:
+      - 10.0
+      - -5.7
+      - 0.0
+    dimensions:
+      - 1.4
+      - 0.8
+      - 0.75
+
+environment_region: main_corridor
+expected_interaction_area:
+  min_x: 6.0
+  max_x: 14.5
+  min_y: -8.0
+  max_y: -4.0
+random_seed: 42
+is_realistic: true
+navmesh_enabled: true
+pedestrian_realism: segmented

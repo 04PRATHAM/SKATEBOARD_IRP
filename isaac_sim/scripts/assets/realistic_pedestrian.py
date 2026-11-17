@@ -144,17 +144,17 @@ class RealisticPedestrian:
         self.root_xform = root_xform
 
         H = self.config.height
-        # Proportions (realistic human)
-        torso_h = H * 0.38  # ~0.665m chest+abdomen
-        torso_r = self.config.shoulder_width * 0.42  # ~0.19m radius
+        # Realistic human proportions (anatomical ratio)
+        torso_h = H * 0.38  # ~0.665m
+        torso_r = self.config.shoulder_width * 0.38  # ~0.17m
         leg_len = H * 0.48  # ~0.84m
-        leg_r = 0.07
-        arm_len = H * 0.32  # ~0.56m
-        arm_r = 0.045
-        head_r = H * 0.07  # ~0.122m
+        leg_r = 0.08
+        arm_len = H * 0.36  # ~0.63m
+        arm_r = 0.05
+        head_r = H * 0.075  # ~0.13m
         shoe_h = 0.08
         shoe_len = 0.26
-        shoe_w = 0.11
+        shoe_w = 0.12
 
         v = self._variant
         skin = Gf.Vec3f(*v["skin"])
@@ -172,23 +172,34 @@ class RealisticPedestrian:
                     attr = prim.CreateAttribute("primvars:displayColor", Sdf.ValueTypeNames.Color3fArray)
                 attr.Set([color])
 
-        # --- TORSO (capsule, vertical) ---
+        # --- TORSO (capsule, vertical along Z, flattened front-to-back like human torso) ---
         torso_z = leg_len + shoe_h + torso_h * 0.5
         torso_path = f"{base_path}/Torso"
         torso_prim = define_prim(torso_path, "Capsule")
         tx = UsdGeom.Xformable(torso_prim)
         tx.AddTranslateOp().Set(Gf.Vec3d(0, 0, torso_z))
-        tx.AddRotateXYZOp().Set(Gf.Vec3d(90, 0, 0))
+        tx.AddRotateXYZOp().Set(Gf.Vec3d(0, 0, 0))
+        tx.AddScaleOp().Set(Gf.Vec3d(0.65, 1.0, 1.0))
         torso_prim.GetAttribute("radius").Set(float(torso_r))
         torso_prim.GetAttribute("height").Set(float(torso_h))
         set_color(torso_path, top_c)
 
-        # --- HEAD (sphere) ---
-        head_z = torso_z + torso_h * 0.5 + head_r * 0.9
+        # --- NECK (cylinder connecting torso and head) ---
+        neck_path = f"{base_path}/Neck"
+        neck_prim = define_prim(neck_path, "Cylinder")
+        nx = UsdGeom.Xformable(neck_prim)
+        nx.AddTranslateOp().Set(Gf.Vec3d(0, 0, torso_z + torso_h * 0.46))
+        neck_prim.GetAttribute("radius").Set(0.065)
+        neck_prim.GetAttribute("height").Set(0.08)
+        set_color(neck_path, skin)
+
+        # --- HEAD (oval sphere) ---
+        head_z = torso_z + torso_h * 0.5 + head_r * 0.95
         head_path = f"{base_path}/Head"
         head_prim = define_prim(head_path, "Sphere")
         hx = UsdGeom.Xformable(head_prim)
         hx.AddTranslateOp().Set(Gf.Vec3d(0, 0, head_z))
+        hx.AddScaleOp().Set(Gf.Vec3d(0.95, 0.90, 1.15))
         head_prim.GetAttribute("radius").Set(float(head_r))
         set_color(head_path, skin)
 
@@ -201,41 +212,45 @@ class RealisticPedestrian:
         hair_prim.GetAttribute("radius").Set(float(head_r))
         set_color(hair_path, hair_c)
 
-        # --- ARMS (2 capsules, hanging at sides, slightly forward) ---
-        shoulder_z = torso_z + torso_h * 0.38
-        shoulder_yL = self.config.shoulder_width * 0.52
-        shoulder_yR = -shoulder_yL
-        for side, sy in [("L", shoulder_yL), ("R", shoulder_yR)]:
+        # Save joint pivot heights for limb swing articulation
+        self._shoulder_z = torso_z + torso_h * 0.38
+        self._hip_z = leg_len + shoe_h
+        self._arm_len = arm_len
+        self._leg_len = leg_len
+        self._shoe_h = shoe_h
+        self._shoulder_yL = self.config.shoulder_width * 0.52
+        self._hip_yL = 0.12
+
+        # --- ARMS (2 capsules, hanging down at sides naturally) ---
+        for side, sy in [("L", self._shoulder_yL), ("R", -self._shoulder_yL)]:
             arm_path = f"{base_path}/Arm_{side}"
             ap = define_prim(arm_path, "Capsule")
             ax = UsdGeom.Xformable(ap)
-            # Arm hangs from shoulder, center at shoulder - arm_len/2
-            arm_center_z = shoulder_z - arm_len * 0.5
+            # Arm hangs down from shoulder, center at shoulder - arm_len/2
+            arm_center_z = self._shoulder_z - arm_len * 0.5
             ax.AddTranslateOp().Set(Gf.Vec3d(0, sy, arm_center_z))
-            ax.AddRotateXYZOp().Set(Gf.Vec3d(90, 0, 0))
+            ax.AddRotateXYZOp().Set(Gf.Vec3d(0, 0, 0))
             ap.GetAttribute("radius").Set(float(arm_r))
             ap.GetAttribute("height").Set(float(arm_len))
             set_color(arm_path, skin)
             self._limb_prims[f"Arm_{side}"] = ap
-            # Hand (small sphere)
+            # Hand (small sphere at end of arm)
             hand_path = f"{base_path}/Hand_{side}"
             hp = define_prim(hand_path, "Sphere")
             hxx = UsdGeom.Xformable(hp)
-            hxx.AddTranslateOp().Set(Gf.Vec3d(0, sy, shoulder_z - arm_len - 0.02))
+            hxx.AddTranslateOp().Set(Gf.Vec3d(0, sy, self._shoulder_z - arm_len - 0.02))
             hp.GetAttribute("radius").Set(float(arm_r * 1.1))
             set_color(hand_path, skin)
+            self._limb_prims[f"Hand_{side}"] = hp
 
         # --- LEGS (2 capsules, from hip to ankle) ---
-        hip_z = leg_len + shoe_h  # top of leg at hip
-        hip_yL = 0.12
-        hip_yR = -0.12
-        for side, sy in [("L", hip_yL), ("R", hip_yR)]:
+        for side, sy in [("L", self._hip_yL), ("R", -self._hip_yL)]:
             leg_path = f"{base_path}/Leg_{side}"
             lp = define_prim(leg_path, "Capsule")
             lx = UsdGeom.Xformable(lp)
             leg_center_z = shoe_h + leg_len * 0.5
             lx.AddTranslateOp().Set(Gf.Vec3d(0, sy, leg_center_z))
-            lx.AddRotateXYZOp().Set(Gf.Vec3d(90, 0, 0))
+            lx.AddRotateXYZOp().Set(Gf.Vec3d(0, 0, 0))
             lp.GetAttribute("radius").Set(float(leg_r))
             lp.GetAttribute("height").Set(float(leg_len))
             set_color(leg_path, bottom_c)
@@ -248,23 +263,39 @@ class RealisticPedestrian:
             sx.AddTranslateOp().Set(Gf.Vec3d(0.04, sy, shoe_h * 0.5))
             sx.AddScaleOp().Set(Gf.Vec3d(shoe_len, shoe_w, shoe_h))
             set_color(shoe_path, shoe_c)
+            self._limb_prims[f"Shoe_{side}"] = sp
 
-        # --- COLLISION CAPSULE (kinematic, invisible) ---
+        # --- COLLISION CAPSULE (kinematic, invisible, vertical along Z) ---
+        # This capsule is the physics proxy for the pedestrian. It blocks the vehicle,
+        # walls, and furniture. Kinematic: pedestrian position is script-driven (trajectory),
+        # not force-driven, but kinematic bodies DO push dynamic bodies (vehicle chassis).
         coll_r = self.config.capsule_radius * 1.05
-        coll_h = self.config.height * 0.92
-        coll_z = coll_h * 0.5
+        coll_h = self.config.height * 0.95
+        coll_z = coll_h * 0.5  # center at mid-height (bottom at z ≈ 0)
         coll_path = f"{base_path}/CollisionCapsule"
         coll_prim = define_prim(coll_path, "Capsule")
         cx = UsdGeom.Xformable(coll_prim)
         cx.AddTranslateOp().Set(Gf.Vec3d(0, 0, coll_z))
-        cx.AddRotateXYZOp().Set(Gf.Vec3d(90, 0, 0))
+        cx.AddRotateXYZOp().Set(Gf.Vec3d(0, 0, 0))
         coll_prim.GetAttribute("radius").Set(float(coll_r))
         coll_prim.GetAttribute("height").Set(float(coll_h))
+        # Apply physics APIs for solid collision
         UsdPhysics.CollisionAPI.Apply(coll_prim.GetPrim())
         rb = UsdPhysics.RigidBodyAPI.Apply(coll_prim.GetPrim())
         rb.CreateKinematicEnabledAttr().Set(True)
         mass_api = UsdPhysics.MassAPI.Apply(coll_prim.GetPrim())
         mass_api.CreateMassAttr().Set(75.0)
+        # Apply PhysX material for realistic contact response
+        try:
+            from pxr import PhysxSchema
+            physx_rb = PhysxSchema.PhysxRigidBodyAPI.Apply(coll_prim.GetPrim())
+            physx_rb.CreateSolverPositionIterationCountAttr().Set(16)
+            physx_rb.CreateSolverVelocityIterationCountAttr().Set(8)
+            physx_col = PhysxSchema.PhysxCollisionAPI.Apply(coll_prim.GetPrim())
+            physx_col.CreateContactOffsetAttr().Set(0.04)
+            physx_col.CreateRestOffsetAttr().Set(0.0)
+        except Exception:
+            pass
         UsdGeom.Imageable(coll_prim.GetPrim()).MakeInvisible()
 
         self.collision_prim = coll_prim
@@ -280,6 +311,19 @@ class RealisticPedestrian:
         dt = sim_dt
         self._trajectory_points = []
         num_steps = int(duration / dt)
+        def _clamp(px, py):
+            # Safe interior zone inside lab perimeter walls (-15 to 15, -12.5 to 12.5)
+            px = max(-13.5, min(13.5, px))
+            py = max(-11.0, min(11.0, py))
+            # Glass partition buffer (avoid tunneling through glass offices)
+            # Glass L: x around -5.0, y in [-10.0, 0.0]
+            if -5.25 <= px <= -4.75 and -10.2 <= py <= 0.2:
+                px = -4.7 if px > -5.0 else -5.3
+            # Glass R: x around 5.0, y in [0.0, 10.0]
+            if 4.75 <= px <= 5.25 and -0.2 <= py <= 10.2:
+                px = 5.3 if px > 5.0 else 4.7
+            return px, py
+
         # If destination explicitly set, lerp toward it; else use type-based traj
         has_dest = self.config.destination is not None
         if has_dest:
@@ -297,6 +341,7 @@ class RealisticPedestrian:
                 dist = min(v * t, total_dist)
                 px = x + dir_x * dist
                 py = y + dir_y * dist
+                px, py = _clamp(px, py)
                 self._trajectory_points.append((px, py, z))
         else:
             for i in range(num_steps + 1):
@@ -320,6 +365,7 @@ class RealisticPedestrian:
                     py = y
                 else:
                     px, py = x, y
+                px, py = _clamp(px, py)
                 self._trajectory_points.append((px, py, z))
         self._current_target_idx = 0
 
@@ -346,7 +392,7 @@ class RealisticPedestrian:
         )
 
     def _animate_limbs(self, t: float):
-        """Procedural walking animation: legs and arms swing antiphase."""
+        """Procedural walking animation: legs and arms swing antiphase along sagittal (X-Z) plane."""
         if self.config.pedestrian_type == PedestrianType.STATIONARY:
             return
         # Walk frequency ~ velocity / stride (0.7m stride) => ~1.7Hz at 1.2 m/s
@@ -360,33 +406,50 @@ class RealisticPedestrian:
         leg_R_angle = swing_leg * math.sin(phase + math.pi)
         arm_L_angle = swing_arm * math.sin(phase + math.pi)
         arm_R_angle = swing_arm * math.sin(phase)
-        for side, angle in [("L", leg_L_angle), ("R", leg_R_angle)]:
-            prim = self._limb_prims.get(f"Leg_{side}")
-            if prim:
+
+        # Animate legs and shoes (pitch rotation around Y axis)
+        for side, angle, sy in [("L", leg_L_angle, self._hip_yL), ("R", leg_R_angle, -self._hip_yL)]:
+            rad = math.radians(angle)
+            leg_prim = self._limb_prims.get(f"Leg_{side}")
+            if leg_prim:
                 try:
-                    xform = UsdGeom.Xformable(prim)
-                    # Find rotate op; we set Y rotation (swing forward/back)
-                    # Legs pivot at hip, so rotation around Y (pitch)
-                    # Our capsule is oriented (90,0,0) — rotating Y swings in X
-                    # Use RotateXYZ with (angle,0,0) for simplicity — subtle walk
-                    ops = xform.GetOrderedXformOps()
-                    for op in ops:
-                        if op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
-                            # Keep (90,0,0) base + swing
-                            base = 90.0
-                            # Swing around X: add angle
-                            op.Set(Gf.Vec3d(base + angle * 0.5, 0, 0))
+                    lx = UsdGeom.Xformable(leg_prim)
+                    cx = (self._leg_len * 0.5) * math.sin(rad)
+                    cz = self._hip_z - (self._leg_len * 0.5) * math.cos(rad)
+                    lx.GetTranslateOp().Set(Gf.Vec3d(cx, sy, cz))
+                    lx.GetRotateXYZOp().Set(Gf.Vec3d(0, -angle, 0))
                 except Exception:
                     pass
-        for side, angle in [("L", arm_L_angle), ("R", arm_R_angle)]:
-            prim = self._limb_prims.get(f"Arm_{side}")
-            if prim:
+            shoe_prim = self._limb_prims.get(f"Shoe_{side}")
+            if shoe_prim:
                 try:
-                    xform = UsdGeom.Xformable(prim)
-                    for op in xform.GetOrderedXformOps():
-                        if op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
-                            base = 90.0
-                            op.Set(Gf.Vec3d(base + angle * 0.6, 0, 0))
+                    sx = UsdGeom.Xformable(shoe_prim)
+                    foot_x = 0.04 + self._leg_len * math.sin(rad)
+                    foot_z = max(0.01, self._hip_z - self._leg_len * math.cos(rad) - self._shoe_h * 0.5)
+                    sx.GetTranslateOp().Set(Gf.Vec3d(foot_x, sy, foot_z))
+                except Exception:
+                    pass
+
+        # Animate arms and hands (pitch rotation around Y axis)
+        for side, angle, sy in [("L", arm_L_angle, self._shoulder_yL), ("R", arm_R_angle, -self._shoulder_yL)]:
+            rad = math.radians(angle)
+            arm_prim = self._limb_prims.get(f"Arm_{side}")
+            if arm_prim:
+                try:
+                    ax = UsdGeom.Xformable(arm_prim)
+                    cx = (self._arm_len * 0.5) * math.sin(rad)
+                    cz = self._shoulder_z - (self._arm_len * 0.5) * math.cos(rad)
+                    ax.GetTranslateOp().Set(Gf.Vec3d(cx, sy, cz))
+                    ax.GetRotateXYZOp().Set(Gf.Vec3d(0, -angle, 0))
+                except Exception:
+                    pass
+            hand_prim = self._limb_prims.get(f"Hand_{side}")
+            if hand_prim:
+                try:
+                    hx = UsdGeom.Xformable(hand_prim)
+                    hand_x = self._arm_len * math.sin(rad)
+                    hand_z = self._shoulder_z - self._arm_len * math.cos(rad) - 0.02
+                    hx.GetTranslateOp().Set(Gf.Vec3d(hand_x, sy, hand_z))
                 except Exception:
                     pass
 

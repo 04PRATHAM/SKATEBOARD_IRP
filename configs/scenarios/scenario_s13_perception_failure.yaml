@@ -1,0 +1,32 @@
+# Scenario S13: Perception and Communication Failure
+# Objective: Perception stream interruption/failure injection.
+# Failsafe watchdog detects stale sensor data (>0.6s) and commands emergency safe stop (STALE_STOP).
+# Acceptance Condition: Fault detection and safe stop activation.
+
+scenario_name: scenario_s13_perception_failure
+description: Sensor failure injection scenario; stale perception watchdog halts vehicle safely.
+
+vehicle_start_pose:
+  - 6.0
+  - -6.0
+  - 0.35
+  - 0.0
+
+vehicle_destination_pose:
+  - 13.5
+  - -6.0
+  - 0.0
+
+pedestrians: []
+
+static_obstacles:
+  - object_type: table
+    object_id: static_table_01
+    position:
+      - 10.0
+      - -6.0
+      - 0.0
+    dimensions:
+      - 1.4
+      - 0.8
+      - 0.75

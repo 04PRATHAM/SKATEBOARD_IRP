@@ -14,6 +14,8 @@ Sync: depth matched within sync_tolerance of detection stamp, else dropped+count
 Ground truth: never subscribed, never read (TEST-K).
 """
 import argparse
+import collections
+import math
 import sys
 import time
 
@@ -23,6 +25,7 @@ sys.path.insert(0, "/home/ubuntu/SKATEBOARD_IRP/ros2_ws/src/rgbd_perception")
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, CameraInfo
 from vision_msgs.msg import (Detection2DArray, Detection3DArray, Detection3D,
                              ObjectHypothesisWithPose)
@@ -37,6 +40,22 @@ def parse_args():
     return p.parse_args()
 
 
+# Physical depth thickness priors for opaque objects viewed monocularly
+CLASS_DEPTH_PRIORS = {
+    "person": 0.45,
+    "0": 0.45,
+    "chair": 0.60,
+    "56": 0.60,
+    "table": 0.85,
+    "dining table": 0.85,
+    "60": 0.85,
+    "couch": 0.90,
+    "57": 0.90,
+    "bench": 0.80,
+    "13": 0.80,
+}
+
+
 class FusionNode(Node):
     def __init__(self, cfg):
         super().__init__("rgbd_fusion_node")
@@ -44,32 +63,40 @@ class FusionNode(Node):
         pc, tp = cfg["perception"], cfg["topics"]
         self.method = pc.get("depth_method", "mask_median")
         self.trim = float(pc.get("trim_fraction", 0.1))
-        self.min_d = float(pc.get("min_depth", 0.3))
-        self.max_d = float(pc.get("max_depth", 10.0))
+        self.min_d = float(pc.get("min_depth", 0.30))
+        self.max_d = float(pc.get("max_depth", 10.00))
         self.min_frac = float(pc.get("min_valid_fraction", 0.05))
-        self.sync_tol = float(pc.get("sync_tolerance", 0.1))
+        self.sync_tol = float(pc.get("sync_tolerance", 0.10))
         self.depth_frame = tp["depth_optical_frame"]
         self.pub = self.create_publisher(Detection3DArray, tp["objects"], 10)
         self.create_subscription(Detection2DArray, tp["detections"], self.on_det, 10)
         self.create_subscription(Image, "/perception/masks", self.on_mask, 10)
-        self.create_subscription(Image, tp["depth"], self.on_depth, 10)
-        self.create_subscription(CameraInfo, tp["depth_info"], self.on_info, 10)
-        self.masks, self.depth, self.info = None, None, None
-        self.stats = {"pairs": 0, "drops": 0, "objects": 0}
+        self.create_subscription(Image, tp["depth"], self.on_depth, qos_profile_sensor_data)
+        self.create_subscription(CameraInfo, tp["depth_info"], self.on_info, qos_profile_sensor_data)
+        
+        # Ring buffers for precise timestamp synchronization (rejects stale pairs)
+        self.depth_buffer = collections.deque(maxlen=20)
+        self.masks_buffer = collections.deque(maxlen=20)
+        self.info = None
+        self.stats = {"pairs": 0, "drops": 0, "objects": 0, "sync_errors": []}
 
     def on_mask(self, m):
         try:
-            self.masks = (m, np.frombuffer(m.data, dtype=np.uint8).reshape(m.height, m.width))
+            t = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+            arr = np.frombuffer(m.data, dtype=np.uint8).reshape(m.height, m.width)
+            self.masks_buffer.append((t, m, arr))
         except Exception:
-            self.masks = None
+            pass
 
     def on_depth(self, m):
         try:
             if m.encoding != "32FC1":
                 return
-            self.depth = (m, np.frombuffer(m.data, dtype=np.float32).reshape(m.height, m.width))
+            t = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+            arr = np.frombuffer(m.data, dtype=np.float32).reshape(m.height, m.width)
+            self.depth_buffer.append((t, m, arr))
         except Exception:
-            self.depth = None
+            pass
 
     def on_info(self, m):
         self.info = m
@@ -79,31 +106,48 @@ class FusionNode(Node):
         out = Detection3DArray()
         out.header.stamp = det_msg.header.stamp
         out.header.frame_id = self.depth_frame
-        if self.depth is None or self.info is None:
+        if not self.depth_buffer or self.info is None:
             self.stats["drops"] += 1
             return
-        d_msg, depth = self.depth
-        t_dep = d_msg.header.stamp.sec + d_msg.header.stamp.nanosec * 1e-9
-        if abs(t_det - t_dep) > self.sync_tol:
+
+        # Find depth frame with minimum |t_det - t_dep|
+        best_depth = None
+        best_dep_diff = float("inf")
+        for t_dep, d_msg, depth_arr in self.depth_buffer:
+            diff = abs(t_det - t_dep)
+            if diff < best_dep_diff:
+                best_dep_diff = diff
+                best_depth = (d_msg, depth_arr)
+
+        if best_dep_diff > self.sync_tol or best_depth is None:
             self.stats["drops"] += 1
             return
+
+        d_msg, depth = best_depth
+        self.stats["sync_errors"].append(best_dep_diff)
+        if len(self.stats["sync_errors"]) > 100:
+            self.stats["sync_errors"].pop(0)
+
+        # Find corresponding mask frame
+        masks = None
+        best_mask_diff = float("inf")
+        for t_m, m_msg, m_arr in self.masks_buffer:
+            diff = abs(t_det - t_m)
+            if diff < best_mask_diff:
+                best_mask_diff = diff
+                masks = m_arr
+        if best_mask_diff > self.sync_tol:
+            masks = None
         try:
             K = list(self.info.k)
             fx, fy, cx, cy = float(K[0]), float(K[4]), float(K[2]), float(K[5])
         except Exception:
             return
         H, W = depth.shape
-        masks = self.masks[1] if self.masks and self.masks[1].shape == (H, W) else None
-        if masks is None and self.masks is not None:
+        if masks is not None and masks.shape != (H, W):
             try:
-                import cv2  # not required; fallback below
-                _ = cv2
-            except Exception:
-                pass
-            try:
-                from PIL import Image as PImage
-                m = np.array(PImage.fromarray(self.masks[1]).resize((W, H), PImage.NEAREST))
-                masks = m
+                import cv2
+                masks = cv2.resize(masks, (W, H), interpolation=cv2.INTER_NEAREST)
             except Exception:
                 masks = None
         self.stats["pairs"] += 1
@@ -130,6 +174,7 @@ class FusionNode(Node):
             o = Detection3D()
             o.header.stamp = det_msg.header.stamp
             o.header.frame_id = self.depth_frame
+            o.id = f"yolo_det_{i}"  # Explicit detection identifier for 2D-to-3D association
             h = ObjectHypothesisWithPose()
             try:
                 h.hypothesis.class_id = r.results[0].hypothesis.class_id
@@ -142,9 +187,117 @@ class FusionNode(Node):
             o.bbox.center.position.z = float(z)
             o.bbox.size.x = float(bw * z / fx)
             o.bbox.size.y = float(bh * z / fy)
-            o.bbox.size.z = 0.0
+
+            # Physically meaningful bounding box depth extent (thickness along optical Z)
+            # Monocular RGB-D cannot see the back of opaque objects; we combine class priors
+            # with measured visible depth spread across the segmented mask surface.
+            cid_str = str(h.hypothesis.class_id).lower()
+            raw_cid = cid_str.split(":")[-1] if ":" in cid_str else cid_str
+            prior_z = CLASS_DEPTH_PRIORS.get(raw_cid, CLASS_DEPTH_PRIORS.get(cid_str.split(":")[0], 0.50))
+            if masks is not None:
+                mask_i = (masks == (i + 1))
+                val_pts = depth[mask_i & np.isfinite(depth) & (depth >= self.min_d) & (depth <= self.max_d)]
+                if len(val_pts) >= 15:
+                    z_spread = float(np.percentile(val_pts, 90) - np.percentile(val_pts, 10))
+                    phys_depth = max(prior_z, z_spread + 0.15)
+                else:
+                    phys_depth = prior_z
+            else:
+                phys_depth = prior_z
+            o.bbox.size.z = float(np.clip(phys_depth, 0.35, 1.50))
             out.detections.append(o)
             self.stats["objects"] += 1
+
+        # Depth-based geometric obstacle clustering (detects unknown/unclassified obstacles not in COCO)
+        if depth is not None and np.isfinite(depth).any():
+            step_v = 8
+            step_u = 8
+            v_idx, u_idx = np.mgrid[0:H:step_v, 0:W:step_u]
+            sub_d = depth[v_idx, u_idx]
+
+            unmasked = np.ones_like(sub_d, dtype=bool)
+            if masks is not None:
+                sub_m = masks[v_idx, u_idx]
+                unmasked = (sub_m == 0)
+
+            val_pts = unmasked & np.isfinite(sub_d) & (sub_d >= 0.8) & (sub_d <= 7.5)
+            if np.any(val_pts):
+                z_pts = sub_d[val_pts]
+                u_pts = u_idx[val_pts]
+                v_pts = v_idx[val_pts]
+
+                x_pts = (u_pts - cx) * z_pts / fx
+                y_pts = (v_pts - cy) * z_pts / fy
+
+                # Exact height above ground z_v = H_cam - cos(pitch)*y - sin(pitch)*z
+                # H_cam = 1.2m, pitch = -0.15 rad: cos(0.15) = 0.9888, sin(0.15) = 0.1494
+                # z_v >= 0.28m ensures robust floor ground plane separation despite chassis pitch dynamics
+                z_v = 1.20 - 0.9888 * y_pts - 0.1494 * z_pts
+                is_obs = (z_v >= 0.28) & (z_v <= 1.80) & (np.abs(x_pts) < 1.8)
+
+                if np.sum(is_obs) >= 15:
+                    xo = x_pts[is_obs]
+                    yo = y_pts[is_obs]
+                    zo = z_pts[is_obs]
+
+                    # Multi-obstacle clustering by depth continuity (split where depth gap > 0.80m)
+                    order = np.argsort(zo)
+                    xo_s = xo[order]
+                    yo_s = yo[order]
+                    zo_s = zo[order]
+                    split_idx = np.where(np.diff(zo_s) > 0.80)[0] + 1
+                    clusters = np.split(np.arange(len(zo_s)), split_idx)
+
+                    for c_indices in clusters:
+                        if len(c_indices) >= 8:
+                            cx = xo_s[c_indices]
+                            cy = yo_s[c_indices]
+                            cz = zo_s[c_indices]
+
+                            # Further split by lateral X if multiple objects exist at similar depth (e.g. S09 narrow passage)
+                            x_order = np.argsort(cx)
+                            cx_s = cx[x_order]
+                            cy_s = cy[x_order]
+                            cz_s = cz[x_order]
+                            x_split = np.where(np.diff(cx_s) > 0.85)[0] + 1
+                            sub_clusters = np.split(np.arange(len(cx_s)), x_split)
+
+                            for sc_indices in sub_clusters:
+                                if len(sc_indices) >= 8:
+                                    sc_x = cx_s[sc_indices]
+                                    sc_y = cy_s[sc_indices]
+                                    sc_z = cz_s[sc_indices]
+
+                                    med_x = float(np.median(sc_x))
+                                    med_y = float(np.median(sc_y))
+                                    med_z = float(np.median(sc_z))
+
+                                    is_duplicate = False
+                                    for existing in out.detections:
+                                        ex = existing.bbox.center.position.x
+                                        ez = existing.bbox.center.position.z
+                                        if math.hypot(med_x - ex, med_z - ez) < 0.70:
+                                            is_duplicate = True
+                                            break
+
+                                    if not is_duplicate:
+                                        o = Detection3D()
+                                        o.header.stamp = det_msg.header.stamp
+                                        o.header.frame_id = self.depth_frame
+                                        o.id = f"geom_obs_{len(out.detections)}"
+                                        h = ObjectHypothesisWithPose()
+                                        h.hypothesis.class_id = "obstacle"
+                                        h.hypothesis.score = 0.85
+                                        o.results.append(h)
+                                        o.bbox.center.position.x = med_x
+                                        o.bbox.center.position.y = med_y
+                                        o.bbox.center.position.z = med_z
+                                        o.bbox.size.x = float(np.ptp(sc_x) + 0.3)
+                                        o.bbox.size.y = float(np.ptp(sc_y) + 0.3)
+                                        o.bbox.size.z = float(np.ptp(sc_z) + 0.3)
+                                        out.detections.append(o)
+                                        self.stats["objects"] += 1
+
         self.pub.publish(out)
 
 
@@ -154,8 +307,16 @@ def main():
     node = FusionNode(load_config(a.config))
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+    except BaseException as e:
+        print(f"[FUSION EXIT] Exit type: {type(e).__name__}: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+    finally:
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
     print("[STATS]", node.stats, flush=True)
 
 

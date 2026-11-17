@@ -1,0 +1,61 @@
+# Scenario S10: Multiple Obstacles and Crossing Trajectories
+# Objective: Static table at (9.5, -5.7), chair at (12.0, -5.2), and crossing pedestrian at (11.0, -4.5 -> -7.5).
+# Planner manages both static avoidance and dynamic yielding.
+
+scenario_name: scenario_s10_multiple_obstacles_crossing
+description: Complex multi-obstacle environment with static furniture and crossing pedestrian.
+
+vehicle_start_pose:
+  - 6.0
+  - -6.0
+  - 0.35
+  - 0.0
+
+vehicle_destination_pose:
+  - 13.5
+  - -6.0
+  - 0.0
+
+pedestrians:
+  - pedestrian_id: ped_crossing_01
+    type: crossing
+    initial_position:
+      - 11.0
+      - -4.5
+      - 0.0
+    initial_orientation: -1.5708
+    velocity: 0.40
+    trajectory_duration: 30.0
+    start_delay: 2.0
+    height: 1.75
+    shoulder_width: 0.45
+    capsule_radius: 0.28
+    variant_idx: 0
+    human_tier: s3
+    animation: walk
+    is_realistic: true
+    is_real_human: true
+    use_real_human: true
+    wait_time: 0.0
+    destination:
+      - 11.0
+      - -7.5
+      - 0.0
+
+static_obstacles:
+  - object_type: table
+    object_id: static_table_01
+    position:
+      - 9.5
+      - -5.7
+      - 0.0
+    dimensions:
+      - 1.4
+      - 0.8
+      - 0.75
+  - object_type: chair
+    object_id: static_chair_02
+    position:
+      - 12.0
+      - -5.2
+      - 0.0

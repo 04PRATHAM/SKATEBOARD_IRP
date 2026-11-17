@@ -1,0 +1,33 @@
+# Scenario: Physical Blockage & Wheel-Slip Test
+# Objective: A heavy solid obstacle physically blocks the vehicle at x=7.2m.
+# Drive motors are commanded to spin wheels, but physical advancement is 0.0m.
+# Tests whether RGB-D visual motion detects the blockage, stops odometry progression,
+# and causes the planner to enter WHEEL_SLIP safe stop.
+
+scenario_name: scenario_wheel_slip_blocked
+description: Physical blockage test where vehicle wheels spin while vehicle is blocked.
+
+vehicle_start_pose:
+  - 6.0
+  - -6.0
+  - 0.35
+  - 0.0
+
+vehicle_destination_pose:
+  - 13.5
+  - -6.0
+  - 0.0
+
+pedestrians: []
+
+static_obstacles:
+  - object_type: table
+    object_id: block_obstacle_01
+    position:
+      - 7.4
+      - -6.0
+      - 0.0
+    dimensions:
+      - 1.4
+      - 0.8
+      - 0.75

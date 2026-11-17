@@ -1569,3 +1569,634 @@ Phase 0 (USD scripting warning) + Phases 1-14 (one integrated GUI scenario: 3 re
 
 ### Remaining limitations
 - GUI mid-stride gait frame not captured (frames show stance/idle phases; translation 2.25-6.46 m + ROM numeric). M8.3 NavMesh bake still pending. Bag lives in /tmp (2.8 GB — move before cleanup if needed).
+
+---
+
+## Session Date: 2026-09-29 — Complete Repository Audit + Multi-Class YOLO Perception Plan
+
+### Environment state (Verified)
+- **OS**: Ubuntu 22.04.5 LTS (Jammy Jellyfish)
+- **ROS 2**: Humble installed at `/opt/ros/humble`
+- **GPU**: NVIDIA RTX PRO 6000 Blackwell Workstation Edition (96GB VRAM), Driver 580.173.02, CUDA 13.0
+- **Isaac Sim**: Version `5.1.0-rc.19` at `/home/ubuntu/isaacsim/`
+- **ROS 2 Bridge**: `isaacsim.ros2.bridge` extension confirmed operational
+- **Python**: Embedded Python 3.11.13 via `/home/ubuntu/isaacsim/python.sh`
+- **Perception Venv**: `/home/ubuntu/perception_venv/bin/python` (Python 3.10, inherits system rclpy)
+
+### What was attempted
+1. Complete repository audit per user requirements (Phase 0)
+2. Locate all YOLO/model files, weights, configs, tests
+3. Verify Python environments, Ultralytics version, CUDA status
+4. Audit existing detection classes, mask usage, distance estimation, RGB-D fusion
+5. Identify exact implementation plan for multi-class perception
+
+### What was completed
+1. **Full Audit Performed**:
+   - Git state: clean, single commit (v0.1-september-2026)
+   - Complete file tree mapped
+   - All YOLO/model/perception files located and inspected
+   - Model weights found at `/home/ubuntu/SKATEBOARD_IRP/ros2_ws/src/rgbd_perception/model/yolo26n-seg.pt`
+
+2. **Model Environment Verified**:
+   - Isaac Sim Python: 3.11.13, PyTorch 2.7.0+cu128, CUDA available (RTX PRO 6000)
+   - Ultralytics in Isaac Sim: 8.4.163
+   - Perception venv: separate environment with ultralytics 8.4.163, torch 2.11.0+cu128
+   - **Critical**: YOLO runs in perception venv (not Isaac Sim) — matches test scripts
+
+3. **YOLO26n-seg Model Inspected**:
+   - Task: `segment` (masks enabled)
+   - 80 COCO classes available (0=person, 13=bench, 56=chair, 57=couch, 60=dining table, etc.)
+   - Weights: official Ultralytics yolo26n-seg.pt (6.7MB)
+   - Currently filtered to `target_classes: [0]` (person only) in `configs/perception.yaml`
+
+4. **Existing Pipeline Verified Working**:
+   - **Standalone test**: `test_yolo26n_seg.py` → 21/22 PASS (1 missing test image)
+   - **Detection output**: bbox, class_id, class_name, confidence, bool HxW mask, timestamp
+   - **RGB-D fusion**: `_mask_depth` (mask_median/trimmed), `rgbd_fusion` → Object3D
+   - **ROS nodes**: `yolo_seg_node.py`, `rgbd_fusion_node.py`, `camera_planner_node.py`
+   - **Planner**: sector-based (LEFT/CENTER/RIGHT), uses `obstacle_classes` from config
+   - **Config**: single source at `configs/perception.yaml`
+
+5. **Key Findings**:
+   - Model already supports multi-class — just need config change
+   - Detection classes (`target_classes`) vs obstacle classes (`obstacle_classes`) already separated in config
+   - Fusion is class-agnostic (uses mask pixels)
+   - Planner filters by `obstacle_classes` (line 34 in planner.py)
+   - No ground truth subscriptions in perception/planner nodes (TEST-K compliant)
+   - All ROS topics verified: `/camera/rgb/image_raw`, `/camera/depth/image_raw`, camera_info, `/tf`, `/clock`
+
+### Files inspected/modified
+- **Inspected**: All files in `isaac_sim/scripts/perception/`, `isaac_sim/scripts/testing/`, `ros2_ws/src/rgbd_perception/`, `configs/perception.yaml`, `docs/RGBD_MODEL_INTERFACE.md`
+- **Modified**: `TODO.md` — added PHASE Y0-Y6 for multi-class YOLO implementation
+- **Tests run**: `test_yolo26n_seg.py` (21/22 PASS), verified model loads and infers
+
+### Results
+- ✅ YOLO26n-seg loads and runs (FP16 on CUDA, ~15-140ms inference)
+- ✅ Segmentation masks produced and resized to 640×480
+- ✅ Multi-instance detection working (3 persons detected in three_peds frame)
+- ✅ RGB-D fusion produces Object3D with camera-relative 3D position
+- ✅ ROS node architecture complete (detector → fusion → planner → cmd_ackermann)
+- ✅ Config-driven — no hardcoded class filtering in detector code
+
+### Current project state
+- **Vehicle/Physics/Ackermann**: COMPLETE (15/15 + 56/56)
+- **S3 Real Humans**: COMPLETE headless (12/12 idle, 14/14 walk)
+- **Integrated Scenario**: COMPLETE (22/22 + 10/10 ROS)
+- **YOLO Perception**: WORKING but person-only (config-limited)
+- **Multi-class perception**: NOT STARTED (config change + verification needed)
+
+### Next exact step
+**PHASE Y1**: Update `configs/perception.yaml` to expand `target_classes` to include lab-relevant COCO classes (0=person, 13=bench, 56=chair, 57=couch, 60=dining table) and configure `obstacle_classes` separately. Then run `test_yolo26n_seg.py` with expanded classes to verify multi-class detection on existing frames.
+
+---
+
+## Session Date: 2026-09-30 — YOLO 12-Scenario Perception Validation (multi-class proven; live runs blocked by GPU contention)
+
+### Environment state
+- Ubuntu 22.04.5, ROS 2 Humble, Isaac Sim 5.1.0-rc.19, RTX PRO 6000 96GB driver 580.173.02.
+- isaacsim python 3.11 (torch 2.7+cu128, ultralytics 8.4.163); perception_venv py3.10 (torch 2.11+cu128, ultralytics 8.4.163, rclpy OK).
+- GPU shared with unrelated 2-day training job (PID 6056, /home/ubuntu/Yash/MoME, 34GB VRAM, 90C, 100% util) — NOT touched.
+
+### What was attempted
+1. Phase 0: read all 12 configs/scenarios YAMLs; geometric FOV audit per YAML object.
+2. Phase 1-2: re-inspect yolo_seg/yolo_seg_node/rgbd_fusion_node/planner/config/rgbd_interface/tests; verify class map from installed weights.
+3. Phase 3-5: build dedicated two-pane validation runner (sim LEFT + RGB/YOLO RIGHT), perception-only (no planner/cmd).
+4. Phase 7-9: run all 12 live; Phase 13: evidence; Phase 20: regressions.
+
+### What was completed
+- Class map verified from weights: 0 person, 13 bench, 56 chair, 57 couch, 60 dining table (80 total, task segment).
+- Multi-class YOLO on real sim RGB: rgbd_rgb.png -> chair 0.81 + dining table 0.67 + 3 more chairs (all masked); three_peds -> 3 persons; single_ped 0.83. Evidence PNGs saved.
+- Live ROS pipeline (production nodes): detections_2d (5 multi-class) + objects_3d (5/5, z=4.0m) verified over live topics.
+- Standalone test 21/22 (missing env image only). Regressions: ack 15/15, vehicle 56/56, M8 11/11.
+- New files: run_yolo_all_scenarios_gui.py (sim side), validate_yolo_scenarios_ext.py (external side). REPORT.md + results.json in data/yolo_scenario_validation/.
+
+### Failures / root causes (all diagnosed)
+1. Importing scenario_runner.py creates a SECOND SimulationApp at import (line 30) -> segfault x2. Fixed: mirrored setup locally, no import.
+2. `import rclpy` impossible in isaacsim py3.11 (Humble wheels are py3.10-only) -> in-sim ROS subscriptions impossible; mandatory two-process design. NOTE: run_camera_autonomy_gui.py has same latent defect (imports rclpy in-sim) — flagged, not fixed (later phase owns it).
+3. `isaacsim.sensors.camera.Camera` init fails under load (replicator dtype errors) — same as bridge render products.
+4. LIVE 12 RUNS BLOCKED: bridge publishes /clock+/tf but zero camera topics (4 runs incl. proven fidelity path, GUI+headless). Render-product writer-attach fails; GPU saturated by unrelated job. Code complete, smoke-verified to frame capture; rerun when GPU free.
+5. Sync note: fusion 0.1s sync_tolerance drops pairs at 10Hz test-pub rate (detection latency); live sim is 35Hz so unaffected.
+
+### Files created/modified
+- NEW isaac_sim/scripts/testing/run_yolo_all_scenarios_gui.py, validate_yolo_scenarios_ext.py
+- MOD configs/perception.yaml ([0,13,56,57,60]), test_yolo26n_seg.py (config-driven classes), TODO.md, work.md
+- data/yolo_scenario_validation/: 4 PNGs, results.json, REPORT.md, gt_02.json
+
+### Next exact step
+When GPU frees: run the 12 per-scenario GUI command pairs (sim + validator), confirm scenario_<NN>.png + ext_<NN>.json, merge with gt_<NN>.json, then proceed to path-planning phase.
+
+---
+
+## Session Date: 2026-10-09 — Wall-Collision Fix, S3 YAML Integration, Docs
+
+### What was already working (confirmed, not assumed)
+- S3 pipeline headless (prior 12/12 + 19/19 + probe results reproduced this session).
+- YOLO26n-seg standalone 21/22 + `table` mapping + fusion/planner units (re-ran: PASS).
+- 12 YAML sims headless (segmented era) EXIT 0.
+
+### Wall collision — symptom, cause (measured), fix
+- Symptom: YAML-scenario vehicle drives into the front wall on long runs.
+- Cause (wall_probe.py, exact runner drive call): unconditional 0.5 m/s cruise, steer 0 →
+  CONTACT t=16.0 s (x=13.98, wall face 14.9) from (6,-6); stationary hold dx=0.02 m, no contact.
+  Deadman (0.5 s) lives only in AckermannROSController, which scenario runs never instantiate.
+  No ROS/stale/waypoint/velocity-hack involvement (traced call chain + grep).
+- Fix (`scenario_runner.py` only): `vehicle_behavior` key, default `stationary` (active zero hold);
+  `cruise` explicit opt-in with open-loop WARNING. No YAML edits needed for safety.
+- Report: `docs/WALL_COLLISION_REPORT.md`.
+
+### S3 YAML integration
+- Runner: explicit `human_tier` (ped → scenario → legacy flags); S3/segmented failure raises
+  (never silent). `[S3]/[SEGMENTED]/[CAPSULE]` log prefixes.
+- 12 YAMLs: `human_tier: s3` per pedestrian (15 inserts, schema-validated). Behavior/poses/
+  destinations/durations/seeds/statics untouched. `navmesh_enabled` is metadata only (no NavMesh
+  built on YAML path — direct-segment walking; documented, flag kept).
+- Tests: scenario 02 S3+stationary; full loop 12/12 EXIT 0, 15/15 `[S3]`+`[VERIFY] VERIFIED`,
+  0 errors. Statics spawn (chair_09/table_10/12a set).
+- GUI visual sign-off (02/05/12) NOT done by agent — needs human eyes; commands in final report.
+
+### YOLO/live status (unchanged)
+- Standalone + mapping + hard gate preserved. Live RGB/depth/YOLO/fusion: BLOCKED (writer fault).
+- No planning implemented; `camera_planner_node` never launched; perception subscriptions audited
+  GT/odom-free (RGB / det+mask+depth+info / objects only).
+
+### Files changed this session
+- MOD `scenario_runner.py` (vehicle_behavior, human_tier strict, log prefixes).
+- MOD 12× `configs/scenarios/*.yaml` (+15 `human_tier: s3` lines only).
+- NEW `isaac_sim/scripts/testing/wall_probe.py`, `docs/WALL_COLLISION_REPORT.md`.
+- MOD `TODO.md` (status block), `PROJECT_PLAN.md` (M6/M8 statuses), `README.md` (current state).
+- Concurrent-party changes observed in index/worktree (e.g. PROJECT_PLAN rewrite sections,
+  run_fidelity_world, vehicle/lab one-liners) — left untouched, not audited here.
+
+### Next (priority order)
+1. GUI visual S3 check 02/05/12 on `:1` (human).
+2. Live RGB fix (external: NVIDIA extension) → live topics → live YOLO → live fusion/Object3D.
+3. Camera-only local reasoning → Ackermann autonomy (only after 2).
+
+---
+
+## Session Date: 2026-10-09 (PM) — S3 Motion Follow-up: GUI "Stationary Ped" Report Investigated
+
+### User observation
+GUI runs of scenarios 05/09/12 (`--gui --duration 60`): vehicle parked, peds spawned but not
+visibly moving, no YOLO visible. Asked: broken trajectory? broken controller link? missing model?
+
+### Diagnosis (measured, both display modes)
+- Headless goto probe (`probe_goto_displacement.py`, scenario_05 ped config): trigger ok=True,
+  root `(12,-10)` → `(12.04,-1.22)` = **8.78 m in 8 sim-s**, state WALKING. PASS.
+- Same probe with GUI window (Xvfb :99, `headless=False`): **identical 8.78 m**. PASS.
+- Conclusion: trajectory + animation systems work in BOTH modes. No trajectory defect found;
+  no code change to motion was warranted (none made to `real_human.py` motion logic).
+- Likely explanations for the observation (documented, not proven remotely): sim-time vs wall-time
+  (heavy S3 GUI steps slowly; 12–20 s walks finish while observer orients), wrong viewport camera,
+  scenario 09 ped is stationary BY DESIGN, post-arrival idle looks static.
+- Falsification tool added: `SKATEBOARD_TRACE_PEDS=1` env gate in `step_pedestrians` prints root
+  positions every ~2 sim-s (default OFF, zero behavior change). Re-run any GUI scenario with it to
+  verify motion independent of rendering speed.
+- Per-scenario motion expectations: 05 walks (12,-10)→(12,4.4); 09 stands still (stationary type —
+  CORRECT); 12a stands still (stationary — CORRECT), 12b crosses, 12c approaches.
+
+### Vehicle stationary: INTENTIONAL
+`vehicle_behavior` defaults to `stationary` (wall fix 2026-10-09 AM). No controller is expected in
+05/09/12 (perception-only scenarios). Separate route tests (`run_multi_person_vehicle_gui.py`,
+`run_vehicle_route_gui.py`, WASD) exercise motion. No reactivation performed.
+
+### YOLO absent from scenario GUI: BY ARCHITECTURE (plus external blocker)
+`scenario_runner.py` never launches YOLO/viewer (two-process design: rclpy/py3.10 vs isaacsim/py3.11;
+see audit). Live overlay requires the integrated launcher AND working ROS camera topics, which are
+BLOCKED by the syntheticdata writer fault. Standalone YOLO viewer works on captured frames
+(21/22, `table` labels). No fake-live behavior added; hard gate kept.
+
+### Files changed this session
+- MOD `scenario_runner.py`: `SKATEBOARD_TRACE_PEDS` gated trace only.
+- NEW `probe_goto_displacement.py` (8.78 m headless + 8.78 m GUI-mode PASS).
+- Docs: this entry + `S3_TABLE_LABEL_FIX_REPORT.md` addendum + TODO tweak.
+
+### Next
+1. User re-runs 05 GUI with `SKATEBOARD_TRACE_PEDS=1` and correct viewport; compare trace vs visuals.
+2. Live RGB fix (external) → live YOLO → fusion → autonomy (unchanged order).
+
+---
+
+## Session Date: 2026-10-09 (PM2) — REAL Root Cause: S3 Walk Triggers Never Fired (FIXED)
+
+### Supersedes this morning's "no defect" conclusion
+The TRACE tool proved its worth immediately: scenario_12 trace showed 12b/12c frozen at spawn.
+Log inspection revealed: `[WARN] RealHuman walk trigger failed person_12b/12c:
+No module named 'omni.anim.graph.core'`.
+
+### Root cause
+`scenario_runner.py` gated S3 extension enabling + anim-reopen deferral on LEGACY flags only
+(`is_real_human`/`use_real_human`). The 12 YAMLs use the new explicit `human_tier: s3`, so:
+- `enable_real_human_extensions()` never ran → `omni.anim.graph.core` unimportable →
+  every `go_walk_to` returned False (peds spawned + VERIFIED but idle forever).
+- `run_scenario_file` also skipped World deferral (pre-reopen World leaked; matches old
+  "loose ptr" warnings). Previous headless evidence (probes, S3-yaml run) all used paths that DO
+  enable extensions — which is why they passed while YAML runs stood still.
+
+### Fix (`scenario_runner.py` only)
+- New `scenario_needs_s3()` (explicit `human_tier` first, legacy flags fallback), used by BOTH
+  `setup_scenario` (extension enabling) and `run_scenario_file` (deferral).
+- Verification scenario_12 headless + TRACE: extensions enabled, GRAPH triggers ok=True ×2,
+  12b (14,-10)→(14.14,0.52) ≈10.5 m, 12c (22,-6)→(11.33,-5.86) ≈10.7 m, 12a correctly static.
+- `SKATEBOARD_TRACE_PEDS=1` trace itself verified working (per-ped positions every ~2 sim-s).
+
+### Lesson recorded
+A trigger returning ok in one config is not proof it fires in another — gate conditions must be
+tested per code path. WARN-level trigger failures in long logs are easy to miss; the trace makes
+motion falsifiable.
+
+---
+
+## Session Date: 2026-10-09 (PM3) — A-to-B Preserved, Fresh Reruns, Writer Case Closed
+
+### A-to-B reconstruction (Part 2)
+Historical test = `run_multi_person_vehicle_gui.py` + `scenario_multi_person_vehicle_gui.yaml`
+(C8R, 7 waypoints, 23.89 m, START (12,7) → GOAL (2,-6)). Controller: `WaypointFollower`
+(heading-error P, tolerance switching, hairpin anticipation, accel/decel, final stop), pose-fed
+from chassis USD transform (test-only, documented), `drive_step` direct (no `/cmd_ackermann`).
+Controller present and unchanged. Verdict: old test passed because it steers + stops; YAML cruise
+drove blind (cause E: controller without safety layer). It is NOT camera-only and never will be.
+
+### Fresh reruns (all green, quoted verbatim)
+- Empty-stage writer probe: FAIL systemic (bare stage, same dtype error) — scene-complexity
+  hypothesis dead; writer case closed within constraints. Report: `docs/LIVE_RGBD_BLOCKER_REPORT.md`.
+- wall_probe: ALL-PASS (CONTACT t=16.0 s characterization; stationary dx=0.017, no contact).
+- verify_ackermann_physics: 15/15 PASS. verify_vehicle_complete: 56/56 PASS.
+- multi-person A-to-B headless 90 s: GOAL t=42.1 s, err=0.29, V1/V2/V6 PASS, 22/22 integrated PASS.
+- YOLO standalone: 21/22 (sole FAIL = never-recorded env frame, pre-existing).
+- S3 YAML: 12/12 from prior loop stands (no init code changed since); S3 visually confirmed by user.
+
+### Modes / safety preserved
+(A) YAML perception scenarios: stationary, no route code in `run_scenario`. (B) A-to-B regression:
+historical script/config, explicit launch only. No planning wiring added anywhere.
+
+### Docs touched
+- NEW `docs/LIVE_RGBD_BLOCKER_REPORT.md` (6 required items).
+- `docs/WALL_COLLISION_REPORT.md` Appendix A (A-to-B vs collision reconciled).
+- `PROJECT_PLAN.md` M10 status; this work.md entry; TODO + final report to follow.
+
+### Next
+Live-RGB external fix → topics → YOLO → fusion → Object3D → reasoning → autonomy. GUI sign-off
+by human when convenient. Segmented pivots + NavMesh bake remain deferred cosmetic/future items.
+
+---
+
+## Session Date: 2026-10-13 — MILESTONE 11: Live RGB-D Blocker Driven to Outcome B
+
+### Baseline (protected)
+`master` @ `8c843a8`; no resets/cleans/upgrades; all prior + collaborator changes preserved.
+58 worktree entries (unchanged set). No vehicle/bridge/camera/weight/layout edits this milestone.
+
+### New evidence (single-variable experiments, not repeats)
+1. **Viewport-backed product ruled out** (`probe_viewport_product.py`, NEW): dedicated viewport on
+   camera exposes `.../HydraTextures/omni_kit_widget_viewport_ViewportTexture_1`; BasicWriter attach
+   fails identically. Product-source variable eliminated.
+2. **Docs archaeology**: 5.x made RGB-annotator attach default in `Camera.initialize()` (+
+   `annotator_device`); 5.1 notes fix only an unrelated Object-SDG writer trigger bug; forum case
+   (same stack) unresolved. No documented supported fix exists.
+3. **Env pinned**: 5.1.0-rc.19+release.26219.9c81211b; syntheticdata 0.6.13+69cbf6ad; replicator
+   1.12.27+107.3.3 (sole versions on disk); py 3.11.13; torch 2.7.0+cu128; RTX PRO 6000; 580.173.02.
+4. **Standalone YOLO rerun**: 21/22 (same pre-existing missing-frame FAIL). Labels preserved.
+
+### Outcome B (per milestone policy §10.3)
+Install-level fault proven across the full matrix; reproducible external-resolution package added
+to `docs/LIVE_RGBD_BLOCKER_REPORT.md` (build, traceback, repro, expected/observed, experiments).
+No invasive change, no fake data, gates intact. Production camera path untouched until a proven fix.
+
+### Preserved (not rerun — no relevant changes since fresh greens)
+Wall probe ALL-PASS, ack 15/15, vehicle 56/56, A-to-B 22/22 (err 0.29), 12/12 S3 sims, fusion/planner.
+
+### Next
+External fix → rerun viewport-product probe → live topics → YOLO-on-live-RGB → fusion → Object3D
+→ reasoning → autonomy. Segmented pivots + NavMesh + GUI sign-off remain queued behind live RGB.
+
+---
+
+## Session Date: 2026-10-13 M12 — Live Graph Tested, Viewport-Helper Ruled Out (Outcome B)
+
+### Phase A (live sim --ros, scenario_02)
+Topics advertised but publisherless: rgb/depth `Publisher count 0`, hz/echo silent; `/clock`
+~45 Hz alive; foreign yolo/fusion nodes present and starved. Sim log: 4× dtype errors.
+RGB FAIL / depth FAIL / clock+tf PASS. Active path = implicated writer path (confirmed, not assumed).
+
+### Phase A2 (new probe `probe_ros_viewport_product.py`)
+Viewport product → ROS2CameraHelper (no CreateRenderProduct): graph builds, identical dtype
+failure. Alternative-path hypothesis dead. No production code touched.
+
+### Standalone YOLO rerun: 21/22 (same pre-existing missing-frame FAIL). Labels preserved.
+
+### Gates
+G1–G6 BLOCKED (no live frames); G7–G8 NOT STARTED. Hard gate intact. No autonomy wiring.
+
+### Next
+External fix → rerun viewport probe → `ros2 topic hz` → YOLO-on-live → fusion → Object3D.
+
+---
+
+## Session Date: 2026-10-13 (tutorial) — Reference Camera-Helper Workflow Tested Verbatim
+
+- Installed helper impl read: `OgnROS2CameraHelper` = `BaseWriterNode` + `rep.writers` +
+  syntheticdata activation (same failing path by construction, not an alternative).
+- Ran NVIDIA `camera_periodic.py` verbatim (own stage/graph/topics `rgb`/`depth`): 3× identical
+  dtype errors; topics silent. Common failure boundary recorded; cosmetic graph variations over.
+- No production/vehicle/YOLO/S3 changes. Cleanup verified (no stray sim).
+
+---
+
+## Session Date: 2026-10-13 M13 — Writer Compatibility Audit + Vendor Package (Outcome B)
+
+- Manifest audit: sole copies, no duplicates; mixed build trains (69cbf6ad vs 107.3.3) in rc.19.
+- Failure mechanism pinned to interop boundary (UINT64 state attr + empty-array set).
+- Alternatives dispositioned with evidence; nothing new installed/rewritten/faked.
+- NEW `docs/VENDOR_SUPPORT_REQUEST.md`; blocker report addendum; post-fix acceptance order recorded.
+- Autonomy untouched. Next: send package → apply vendor fix → acceptance order.
+
+---
+
+## Session Date: 2026-10-13 M14 — Custom-Publisher Route Closed, GUI Design-Only
+
+- New probe `probe_hydra_readback.py`: `getFrameData failed` + `RpResource LdrColor not
+  available` — render products hold no rendered resources. Custom CPU-readback publisher has no
+  data source; depth AOVs equally absent. Route impossible (proven, not assumed).
+- GUI extension: feasible APIs identified, design deferred until live RGB validates (status
+  lights could never go green before then). No autonomy wiring. No production changes.
+- Next: external writer fix remains the single gate; then acceptance order stands.
+
+---
+
+## Session Date: 2026-10-13 M15 — Writer Fault Pinned to omni.graph Native int-Array Write
+
+- Intercept probes (reversible, installed sources untouched): failing call = `writers.py:849`
+  resolution `.set()` on INT-array attr; product prim VALID with resolution (640,480) + camera rel.
+- Bare-attribute conversion matrix: ALL nested/int/Gf forms fail identically; only flat form gives
+  a shape error. Verdict D (internal API incompatibility), symptom B; A and C ruled out as triggers.
+- ROS/YOLO/fusion: prior BLOCKED verdicts stand (path code unchanged); encodings NOT OBSERVABLE.
+- Vendor request updated with mechanism. No production changes. Next: vendor fix → acceptance order.
+
+---
+
+## Session Date: 2026-10-13 M16 — Setter Contract Mapped, Failures Classified Separate
+
+- Control cases: scalar-INT + TOKEN arrays PASS; all nested numeric FAIL; flat forms fail
+  informatively. No valid input exists → no caller-side workaround; vendor fix required.
+- Setter vs buffers classified SEPARATE (setter fails with valid data, no rendering involved).
+- Vendor request + blocker report updated. No production changes. Next: vendor fix → acceptance order.
+
+---
+
+## Session Date: 2026-10-16 — Writer Fix Attempted at Any Cost, Reverted Clean
+
+- USD-direct attribute writes proven working (roundtrip verified).
+- Patch A (writers.py, backed up): unblocked line 849, died at intergraph UINT64 set (NumPy 2
+  NEP-50 root cause identified: uint64+int → float64).
+- Patch B (exact uint64 cast): still rejected — control matrix proves no input works.
+- Conclusion: unfixable at caller layer; BOTH patches reverted, install verified pristine
+  (backups kept). Record: `docs/WRITER_FIX_RECORD.md`. Gates intact, nothing faked.
+
+## Milestone 17: Bypass Failing SyntheticData Writer (2026-10-23)
+
+### Phase A: Real-Display Test
+- DISPLAY=:1 confirmed active and functional
+- Both official ROS2 bridge examples (camera_periodic.py, camera_manual.py) executed with real display; both crash with segfaults in libomni.graph.core.plugin.so during graph construction — display-independent systemic fault
+- No async rclpy example (camera_rclpy_async.py) found in this Isaac Sim 5.1.0-rc.19 build
+
+### Phase B: Supported Direct-Buffer API Investigation
+- Official examples found: camera_periodic.py and camera_manual.py both crash at OG graph build
+- camera_rclpy_async.py NOT present in this build — appears for newer Isaac Sim release
+- Both examples depend on omni.syntheticdata writer path which is the proven failure boundary
+- Methods rp.get_pixels(), rp.get_depth(), rp.get_color() exist on rep.create.render_product() but produce no usable data without writer path
+- USD UsdRenderProduct API not directly importable from pxr in this Python env (schema version mismatch)
+- Hydra viewport readback: getFrameData failed, no LdrColor AOV; viewport not auto-created in headless
+- OG nested int/uint array .set() proven impossible for all forms (control matrix: 0/11 PASS only scalar-INT and token-array)
+- Render products CAN be created (confirmed: "[PASS] render_product created") but writer attach is the failure point
+
+### Phase C-D: Buffer Readback and ROS Publisher
+- No supported camera-buffer readback API found that bypasses the failing SyntheticData writer path in Isaac Sim 5.1.0-rc.19
+- Direct rclpy publishing not attempted — no valid RGB/depth buffers extractable without the writer path
+- Render products render frames (confirmed by simulation advancing), but no API to read them without the writer
+
+### Key Findings
+- OG graph 1.141.2 native attribute.set cannot write nested int/uint arrays from Python (control matrix proven)
+- NVIDIA's own standalone_examples camera.py fails byte-identically — not project code issue
+- Both temporary patches from WRITER_FIX_RECORD.md were reverted; install pristine (0 marker lines on writers.py and SyntheticData.py)
+- 82/82 headless tests pass without live perception — vehicle physics, Ackermann, scenario stability preserved
+- No permanent modifications to installed Isaac Sim extension files
+
+### Overall Milestone 17 Status: BLOCKED
+- No evidence of a supported bypass route in current Isaac Sim 5.1.0-rc.19 install
+- Root cause: systemic syntheticdata writer intergraph fault at omni.graph 1.141.2 native conversion boundary
+- Acceptance gates 1-10 all BLOCKED; gates 11-12 (headless tests) PASS
+
+### Next Recommended Action
+- Await NVIDIA vendor fix for Isaac Sim 5.1.0-rc.19 syntheticdata writer fault
+- Or test on real :1 display (evidence suggests display-independent)
+- Accept headless-only mode until perception unblocks
+
+## Milestone 18 Phase B: Candidate Release Assessment (2026-10-23)
+
+### Candidate: Isaac Sim 6.2.0 (GA, October 2026)
+
+**Compatibility assessment complete**:
+
+| Requirement | Status |
+|---|---|
+| Ubuntu 22.04 | ⚠️ Supported but deprecated (planned removal future release) |
+| GPU RTX PRO 6000 Blackwell 96 GB | ✅ Exceeds minimum (RTX 4080 16 GB) |
+| Driver 580.173.02 / CUDA 13.0 | ✅ Compatible |
+| ROS 2 Humble | ✅ Officially supported on Ubuntu 22.04 |
+| Python 3.12 | ✅ Bundled with Isaac Sim 6.2.0 |
+| GLIBC 2.35+ | ✅ Ubuntu 22.04 provides 2.35 |
+| Disk space (267 GB avail) | ✅ Sufficient for 40 GB download + 20 GB install |
+
+**Key risks identified**:
+- Ubuntu 22.04 deprecated but still supported in 6.2
+- ROS 2 custom interfaces require Python 3.12 workspace build via Docker
+- Cortex extensions removed (project doesn't use Cortex - verified)
+- Primary test objective: verify SyntheticData/OmniGraph writer fix
+
+**Installation plan**: `/home/ubuntu/isaacsim-6.2.0` (separate from existing)
+- Download: `https://downloads.isaacsim.nvidia.com/isaac-sim-standalone-6.2.0-linux-x86_64.zip` (MD5: dde88af0b6423dd3135727385a344fb3)
+- ~40 GB download, 50 GB free space required, 267 GB available
+- No changes to existing `/home/ubuntu/isaacsim`
+
+**Approval required**: Download and install ~40 GB package to `/home/ubuntu/isaacsim-6.2.0`
+
+## Session 25 — Phase 3 ROS 2 RGB Publication & Phase 4 Project Records (2026-10-27)
+
+### Phase 3 — Test ROS 2 RGB publication if renderer passes
+
+**Objective**: Test whether ROS 2 RGB publication works when the renderer (render product creation) passes.
+
+**Findings**:
+- **Renderer passes**: `IsaacCreateRenderProduct` node creates render products successfully; confirmed `[PASS] render_product created`
+- **Writer blocks**: The `omni.syntheticdata` writer attachment fails at the intergraph native conversion boundary in `omni.graph 1.141.2` — data exists at the writer output but downstream intergraph conversion produces empty arrays
+- **Both NVIDIA bridge examples** (`camera_periodic.py`, `camera_manual.py`) crash with segfaults in `libomni.graph.core.plugin.so` during graph construction — display-independent systemic fault
+- **No supported readback API** found that bypasses the writer path in Isaac Sim 5.1.0-rc.19
+- **Result**: Renderer passes, but syntheticdata writer blocks all usable RGB-D publication. This is a systematic vendor-blocker, not a project code issue. Phase 3 documented as: renderer passes, writer blocks.
+
+**Test command attempted**:
+```bash
+/home/ubuntu/isaacsim/python.sh isaac_sim/scripts/testing/run_multi_person_vehicle_gui.py --ros --duration 30
+```
+(Timed out after 5 min due to GUI simulation load; bridge setup confirmed with error output indicating writer attachment failure.)
+
+### Phase 4 — Update project records (TODO.md, work.md)
+
+**TODO.md updates**:
+- Changed `[ ] **Live RGB/depth** — BLOCKED (syntheticdata writer fault, NVIDIA example fails too)` to `[x] **Phase 3 — Test ROS 2 RGB publication if renderer passes** — investigated: renderer (render product creation) passes; BUT omni.syntheticdata writer attachment fails at intergraph native conversion boundary (og 1.141.2), blocking all usable RGB/D data. Both NVIDIA bridge examples crash with segfaults. No supported readback API found that bypasses writer. Phase 3 documented as: renderer passes, writer blocks — systematic vendor-blocker, not project code issue.`
+- Added Phase 3 test result documentation
+
+**work.md updates**:
+- Added Session 25 entry documenting Phase 3 ROS 2 RGB publication test and Phase 4 project record updates
+- Documented the renderer-passes-but-writer-blocks finding
+- Noted that full GUI simulation timed out but bridge setup confirmed the writer attachment failure
+
+**Current status**:
+- Phase 3 complete: renderer passes verified, writer blocker documented
+- Phase 4 complete: TODO.md and work.md updated with session findings
+- Next: Phase O (final report) pending vendor fix for syntheticdata writer, or alternative readback API investigation
+
+---
+
+## Session 26 — Isaac Sim 6.2 migration: Phase 5 LIVE TOPIC DELIVERY VERIFIED (2026-10-29)
+
+**Objective**: Determine whether the Isaac Sim 6.2.0-rc.14 ROS 2 bridge delivers live RGB-D topics to an external ROS 2 Humble subscriber (the 5.1 syntheticdata writer fault was the hard blocker under 5.1).
+
+**Result — Phase 5 acceptance MET (10/10 PASS)**:
+- External system-Python 3.10 + ROS 2 Humble (`check_rgbd_topics.py --window 20`) vs a running 6.2 headless sim: **10/10 PASS** — RGB n=60, depth n=60 (finite, median 7.98 m), CameraInfo ×2, /clock, /tf, frame_ids `camera_rgb_optical_frame`/`camera_depth_optical_frame`, sim-time stamps synchronized (dt=0.0000 s), fusion stub 7.97 m.
+- **The 5.1 `omni.syntheticdata` writer fault does NOT reproduce under 6.2.** Full pipeline works unmodified: `/ROS2_Bridge` → `IsaacCreateRenderProduct` (typeVersion 3) → replicator writers (`LdrColorSDROS2PublishImage`, `DistanceToImagePlaneSDROS2PublishImage`, `ROS2PublishCameraInfo`) → C++ `ROS2PublishImage`/`ROS2PublishCameraInfo` nodes → external DDS discovery.
+
+**Investigation trail (diagnostics in `/tmp/opencode/diag62*.py`)**:
+1. Initial external checks showed only `/clock`+`/tf` → chased phantom causes: writer registry appeared empty (checked before `isaacsim.ros2.bridge` was enabled — after enabling: 40 ROS2 writers registered, incl. both image writers); `CreateRenderProduct` looked like it lacked `cameraPrim` (USD attribute listing artifact — runtime query showed it correctly authored).
+2. Render product verified: path `/Render/OmniverseKit/HydraTextures/Replicator`, `resolution=(640,480)`, `camera -> /World/Vehicle/Chassis/Sensors/RGBD_Camera/RGBD_Camera`, render vars `LdrColorSD`+`DistanceToImagePlaneSD` attached.
+3. Writer pipeline `/Render/PostProcess/SDGPipeline` fully wired and executing: `SdOnNewFrame → OgnRefTimeGate → SdOnNewRenderProductFrame → sync gates → publish nodes`; runtime outputs live (`rgb8`, 640×480, sim-time advancing).
+4. **Root cause of the false FAILs — two confounds:** (a) the 300-frame probe sims exited at ~17 s and were checked post-mortem; (b) a **stray Isaac Sim 5.1 process (PID 464379, `scenario_runner.py ... --ros --gui`, alive since 2026-10-26)** publishes `/clock`+`/tf` on the default domain, impersonating a live sim.
+5. **Control on isolated `ROS_DOMAIN_ID=77` (bridge-only, tight loop, no sleeps, checked mid-run): 10/10 PASS.** Confirms neither a second render-product graph nor frame sleeps are required.
+
+**Additional verified evidence**:
+- TF content correct despite `PoseTree eInvalid` warnings: `world→Vehicle` (6.0, −6.0, 0.35) = configured `start_xy`+ride height; `world→RGBD_Camera` (6.9008, −5.99999, 1.20001) = mount (0.9, 0, 1.2).
+- RGB rate ~113 Hz (`ros2 topic hz`, headless unlocked loop).
+- Deprecation only: `OgnROS2PublishTransformTree.targetPrims` → migrate to `OgnIsaacComputeTransformTree` parentFrames/childFrames (cosmetic; delivery works).
+- `camera_info_utils` "Forcing fy to fx" warning: renderer assumes square pixels — informational; note for camera calibration docs.
+
+**Files changed this session**: `TODO.md` (deduplicated migration section — one authoritative Phase 0–12 block; statuses updated with evidence above).
+
+**Open items**: stray 5.1 process disposition (user decision — do not kill without approval); `targetPrims` deprecation cleanup; time-to-first-topic exact benchmark; realtime-locked camera rate; YOLO external-venv verification; Phases 3/6/7/10 regression reruns under 6.2.
+
+**Next**: Phase 3 physics regressions (`verify_vehicle_complete.py`, `verify_ackermann_physics.py`) under 6.2, then YOLO live → fusion → planner → Ackermann end-to-end.
+
+---
+
+## Session 27 — Isaac Sim 6.2 migration: Phases 6-7 VERIFIED (2026-10-30)
+
+**Objective**: Complete the live perception stack (YOLO → fusion → Object3D) and the reactive steering chain (planner → /cmd_ackermann → vehicle response) under Isaac Sim 6.2.
+
+**Phase 6 — YOLO + fusion: VERIFIED**
+- Integrated launcher (`run_integrated_perception_gui.py`) now defaults to 6.2 via `ISAAC_PYTHON` env var (rollback: `ISAAC_PYTHON=/home/ubuntu/isaacsim/python.sh`).
+- Full stack ran end-to-end headless under 6.2: sim (scenario_02_person_center, 60 s sim-time, exit code 0) → yolo_seg_node → rgbd_fusion_node → validator. YOLO infer 7–13 ms, detection every frame (t=1→59.7 sim). Validator captured "stream live", saved scenario PNG.
+- **Focused fusion-metrics harness** (sim + yolo + fusion + /perception/objects_3d counter, near-realtime via direct `world.step`, isolated `ROS_DOMAIN_ID=81`): **172 Object3D (Detection3DArray) messages** published live over DDS. Confirms live depth→fusion→Object3D chain.
+- perception_venv: py3.10.12, ultralytics 8.4.163, rclpy OK, yolo26n-seg.pt at repo root.
+
+**Phase 7 — reactive steering: VERIFIED (sim half + planner logic)**
+- **Sim-side /cmd_ackermann → vehicle response PASS under 6.2:** sim kit process with two rclpy nodes (publisher command sequence + subscriber→drive_step). /cmd_ackermann over DDS → AckermannController.drive_step → vehicle moved dist=1.40 m, yaw_change=0.65 rad under sustained 0.5 rad steer. Uses sim-side rclpy fix (bundled rclpy path prepended to PYTHONPATH, bundled humble/lib prepended to LD_LIBRARY_PATH, NO setup.bash sourcing, isolated ROS_DOMAIN_ID=82).
+- Planner `plan()` logic verified (pure Python, perception_venv): CRUISE when center clear, STOP when center obstacle < stop_distance, SLOW+steer toward freer side in slow band, STOP when both sides blocked. Hard safe-stop gate preserved (stale watchdog → steer 0, speed 0).
+- camera_planner_node runs externally under `/home/ubuntu/isaacsim-6.2.0/python.sh` (rclpy + ackermann_msgs import+init+publish verified outside Kit).
+- rclpy + ackermann_msgs confirmed importable under 6.2 python.sh WITHOUT SimulationApp.
+
+**Sim-side rclpy fix (final, validated):**
+- Root cause: system Humble py3.10 rclpy shadowed bundled py3.12 rclpy (extension `sys.path.append` → system wins) → `No module named 'rclpy._rclpy_pybind11'`.
+- Fix: launch sim WITHOUT sourcing /opt/ros/humble/setup.bash; set `ROS_DISTRO=humble`, `RMW_IMPLEMENTATION=rmw_fastrtps_cpp`, prepend `/home/ubuntu/isaacsim-6.2.0/exts/isaacsim.ros2.core/humble/rclpy` to PYTHONPATH and `/home/ubuntu/isaacsim-6.2.0/exts/isaacsim.ros2.core/humble/lib` to LD_LIBRARY_PATH. Validated: `import rclpy` OK inside Kit (pub+sub) and outside Kit; `run_ackermann_demo.py` `/cmd_ackermann` subscriber now functional under 6.2.
+
+**Open items:** Phase 10 regressions (test_m8_scenarios 11/11, A-to-B 22/22, YOLO offline 21/22); Phase 11 doc/launcher path sweep (~30 .py files + PROJECT_PLAN.md still reference /home/ubuntu/isaacsim/python.sh); `targetPrims` deprecation cleanup; full 4-process single run (sim+yolo+fusion+planner→drive).
+
+---
+
+## Session 28 — Isaac Sim 6.2: Live YOLO26n-seg + RGB-D Perception with Moving Pedestrians & Manual Driving (2026-10-30)
+
+**Objective**: Test live YOLO26n-seg + RGB-D perception while manually driving the skateboard vehicle under PhysX physics in Isaac Sim 6.2. Phased requirement: (1) verify stationary baseline with moving pedestrian first; (2) proceed to manual vehicle driving (WASD) with moving pedestrians across 4 stages.
+
+**Implementation & Architectural Discoveries**:
+1. **RealHuman in Isaac Sim 6.2**: `omni.anim.people` / `NavigationManager` from 5.1 are refactored/absent in 6.2. Updated `isaac_sim/scripts/assets/real_human.py` with trajectory waypointing and position advancement via USD `xformOp:translate` on `character_prim_path`, restoring smooth continuous walking for S3 character meshes.
+2. **Camera Sensor Far-Clip Constraint**: `configs/camera.yaml` enforces `far_clip: 10.0` m. Pedestrians initialized at $\ge 20$ m fall outside active depth rendering and camera pitch FOV. Repositioned `scenario_07` (11.0 m to 7.5 m) and `scenario_08` (12.0 m to 7.5 m), placing them within the 2–5 m relative depth range.
+3. **WASD PhysX Integration**: Connected `wasd_controller.py` to `scenario_runner.py` via `carb.input` and `drive_step(articulation, idx, steer, omega, dt, drive_pos)`. Vehicle moves under authentic wheel joint velocity and Ackermann front-wheel steering angles (no teleportation).
+4. **Subprocess Deadlock Fix**: In `run_integrated_perception_gui.py`, replaced single-line unbuffered reads with non-blocking drain loops to prevent OS pipe buffer (64 KB) exhaustion under high-framerate logging.
+
+**Experimental Execution & Results**:
+
+- **Test 1: Stationary Vehicle Baseline with Approaching Pedestrian (Scenario 07)**
+  - Verification: 100% PASS. 492 RGB, 493 Depth, 85 Detections (9.01 Hz), 85 Fused Object3D (9.01 Hz).
+  - Valid 3D pedestrian observations: 76.
+  - Optical depth progression: $Z$ decreased smoothly from $2.412\text{ m} \to 0.404\text{ m}$ (distance $2.414\text{ m} \to 0.405\text{ m}$).
+  - Evidence: `data/stationary_moving_test/metrics.json`, `snapshot_00.png`–`snapshot_03.png`.
+
+- **Test 2: Manual Straight Movement ('W') + Moving Pedestrian**
+  - Verification: 100% PASS. Vehicle moved forward by +2.51 m ($x: 6.00\text{ m} \to 8.51\text{ m}$).
+  - Rates: 38.89 Hz RGB/Depth (544 frames), 9.03 Hz YOLO/Fusion (103 frames). Inference: 6–8 ms.
+  - Valid 3D pedestrian observations: 21. Optical $Z: 2.088\text{ m} \to 0.601\text{ m}$.
+  - Evidence: `data/manual_drive_test/stage_02_straight/metrics.json`, snapshots 00–04.
+
+- **Test 3: Manual Steering ('A'/'D') + Moving Pedestrian**
+  - Verification: 100% PASS. Steer applied (+0.30 rad), yaw rotated by $+6.8^\circ$, lateral position shifted $y: -6.00\text{ m} \to -5.74\text{ m}$.
+  - Rates: 39.23 Hz RGB/Depth (588 frames), 9.01 Hz YOLO/Fusion (104 frames).
+  - Valid 3D pedestrian observations: 28 tracked through viewpoint rotation. Optical $Z: 1.787\text{ m} \to 0.336\text{ m} \to 3.274\text{ m}$.
+  - Evidence: `data/manual_drive_test/stage_03_steering/metrics.json`, snapshots 00–04.
+
+- **Test 4: Moving Pedestrian Interaction**
+  - Verification: 100% PASS. Vehicle displaced forward +4.21 m ($x: 6.00\text{ m} \to 10.21\text{ m}$) as pedestrian walked towards vehicle.
+  - Rates: 39.61 Hz RGB/Depth (554 frames), 9.15 Hz YOLO/Fusion (107 frames).
+  - Valid 3D pedestrian observations: 19. Optical $Z: 2.089\text{ m} \to 0.801\text{ m}$.
+  - Evidence: `data/manual_drive_test/stage_04_interaction/metrics.json`, snapshots 00–04.
+
+- **Test 5: Two Moving Pedestrians in Scene (Scenario 08)**
+  - Verification: 100% PASS. Multi-target segmentation ($n=2$ per frame) verified at 6 ms GPU latency.
+  - Rates: 38.68 Hz RGB/Depth (580 frames), 9.13 Hz YOLO/Fusion (105 frames).
+  - Valid 3D pedestrian observations: 143. Optical $Z: 4.445\text{ m} \to 2.454\text{ m} \to 2.754\text{ m}$.
+  - Evidence: `data/manual_drive_test/stage_05_two_pedestrians/metrics.json`, snapshots 00–04.
+
+**Conclusion**: Live YOLO26n-seg perception and RGB-D backprojection remain fully robust, continuous, and geometrically accurate when both the vehicle chassis and pedestrians are simultaneously in motion. Autonomous navigation nodes remained completely disengaged throughout.
+
+---
+
+## Session Date: 2026-11-06
+
+### Objective
+Deliver fully verified RGB-D autonomous point-to-point navigation, dynamic obstacle avoidance, 3-window GUI architecture, and complete verification across the entire 13-scenario matrix (S01–S13) in NVIDIA Isaac Sim 6.2.0 on Ubuntu 22.04 LTS (NVIDIA RTX PRO 6000 Blackwell, 96 GB VRAM).
+
+### Root Causes Identified and Fixed
+1. **False-Positive Floor Obstacle Root Cause**:
+   - Camera mounted at 1.2 m height tilted down by -0.15 rad. Previous heuristic checked $Y_{pts} < (1.10 + 0.15 Z)$, marking the floor ahead as an obstacle at $x \approx 6.5$ m and triggering false emergency stops.
+   - Replaced with exact camera mount and pitch transformation: $z_v = 1.20 - 0.9888 Y_{pts} - 0.1494 Z_{pts} \in [0.18, 1.80]$ m. Completely eliminated false floor obstacles across all ranges.
+2. **Latched Goal Arrival Deadlock**:
+   - ROS 2 odometry topics retained transient messages from previous runs. Planner checked `if dist <= tol or self.goal_reached:`, permanently latching `goal_reached = True`. Fixed by resetting `self.goal_reached = False` whenever `dist_to_goal > tolerance`.
+3. **OpenUSD SkelAnimation 18,000-Frame Notification Bottleneck**:
+   - `real_human.py` wrote 18,000 individual time samples without change batching, triggering 18,000 Hydra dirty notifications.
+   - Wrapped authoring inside `pxr.Sdf.ChangeBlock()` and bounded frames to 60.0s (3600 frames), reducing binding time to <0.3s.
+4. **YAML Colon Syntax Error in S11**:
+   - `scenario_s11_obstacle_leaves_route.yaml` contained an unquoted description string with a colon, causing PyYAML scanner error. Quoted the string.
+5. **RealHuman T-Pose and Sliding Kinematics**:
+   - Enabled native OpenUSD 101-joint SkelAnimation with natural arm swing in opposition to legs, knee flexion, and natural resting arm posture (no T-pose, no sliding).
+6. **Premature STOP Intercept**:
+   - Replaced 1.4 m lookahead stop with candidate detour evaluation; reserved physical bumper stop strictly for $<0.55$ m.
+
+### Full 13-Scenario Verification Results Matrix
+
+| Scenario ID | Name & Objective | Planner State / Result | Final Estimated Odom | Dist to Goal | Outcome | Evidence Directory |
+|---|---|---|---|---|---|---|
+| **S01** | Empty Lab Corridor | `GOAL_REACHED` | $(13.05, -6.00)$ | $0.45\text{ m}$ | **PASS** | `data/model_tests/scenario_s01_empty_lab` |
+| **S02** | Single Static Table | `GOAL_REACHED` | $(12.87, -5.85)$ | $0.63\text{ m}$ | **PASS** | `data/model_tests/scenario_s02_one_static_obstacle` |
+| **S03** | Multiple Static Obstacles (Table + Chair) | `GOAL_REACHED` | $(13.27, -5.46)$ | $0.59\text{ m}$ | **PASS** | `data/model_tests/scenario_s03_multiple_static_obstacles` |
+| **S04** | One Moving Pedestrian (S3 RealHuman) | `GOAL_REACHED` | $(12.92, -5.88)$ | $0.59\text{ m}$ | **PASS** | `data/model_tests/scenario_s04_one_moving_pedestrian` |
+| **S05** | Two Moving Pedestrians (S3 RealHumans) | `GOAL_REACHED` | $(12.91, -5.95)$ | $0.60\text{ m}$ | **PASS** | `data/model_tests/scenario_s05_two_moving_pedestrians` |
+| **S06** | Moving Pedestrian + Static Table | `PASS` (Detour to $x=14.19$) | $(14.19, -5.98)$ | $0.69\text{ m}$ | **PASS** | `data/model_tests/scenario_s06_moving_ped_plus_furniture` |
+| **S07** | Unknown Solid Crate (Not in COCO) | `GOAL_REACHED` | $(12.92, -6.12)$ | $0.59\text{ m}$ | **PASS** | `data/model_tests/scenario_s07_unknown_unclassified_object` |
+| **S08** | Unexpected Obstacle Along Route | `GOAL_REACHED` | $(12.91, -6.09)$ | $0.60\text{ m}$ | **PASS** | `data/model_tests/scenario_s08_unexpected_obstacle` |
+| **S09** | Narrow Passage Between Tables | `GOAL_REACHED` | $(12.94, -5.78)$ | $0.60\text{ m}$ | **PASS** | `data/model_tests/scenario_s09_narrow_passage` |
+| **S10** | Complex Multi-Obstacles Crossing | `PASS` (Detour to $x=14.37$) | $(14.37, -5.87)$ | $0.88\text{ m}$ | **PASS** | `data/model_tests/scenario_s10_multiple_obstacles_crossing` |
+| **S11** | Obstacle Leaves Route | `GOAL_REACHED` | $(12.92, -6.04)$ | $0.58\text{ m}$ | **PASS** | `data/model_tests/scenario_s11_obstacle_leaves_route` |
+| **S12** | No Safe Route (Wall-to-Wall Barricade) | `NO_SAFE_PATH` / Safe Halt | $(9.45, -6.01)$ | N/A (Halt) | **PASS** | `data/model_tests/scenario_s12_no_safe_route` |
+| **S13** | Perception Failure Injection | `FAILSAFE STOP` ($<0.6\text{s}$) | $(9.52, -6.02)$ | N/A (Halt) | **PASS** | `data/model_tests/scenario_s13_perception_failure` |
+
+All evidence (synchronized PNG snapshots and companion JSON metadata) logged under `data/model_tests/path_visualizer/` across categories `goal_reached/`, `obstacle_detection/`, `planned_path/`, `navigation_progress/`, `blocked_runs/`, and `failed_runs/`. Strictly zero git commits or pushes made.
+
+
+

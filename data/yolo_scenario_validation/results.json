@@ -1,0 +1,210 @@
+{
+  "model": {
+    "weights": "/home/ubuntu/SKATEBOARD_IRP/ros2_ws/src/rgbd_perception/model/yolo26n-seg.pt",
+    "duplicate": "/home/ubuntu/SKATEBOARD_IRP/yolo26n-seg.pt",
+    "task": "segment",
+    "ultralytics": "8.4.163",
+    "env": "perception_venv python3.10 (torch 2.11+cu128) AND isaacsim python3.11 (torch 2.7+cu128, ultralytics 8.4.163)",
+    "gpu": "RTX PRO 6000 Blackwell 96GB, driver 580.173.02, CUDA available in both envs",
+    "target_classes": [
+      0,
+      13,
+      56,
+      57,
+      60
+    ],
+    "class_map": {
+      "0": "person",
+      "13": "bench",
+      "56": "chair",
+      "57": "couch",
+      "60": "dining table"
+    },
+    "obstacle_classes": [
+      0,
+      13,
+      56,
+      57,
+      60
+    ],
+    "config": "configs/perception.yaml (single source; detector+planner read it, no hard-coded IDs)"
+  },
+  "standalone_yolo": {
+    "cmd": "/home/ubuntu/perception_venv/bin/python isaac_sim/scripts/testing/test_yolo26n_seg.py --device cuda:0",
+    "result": "21/22 (only missing /tmp/opencode/gui_rgb2 env image, never recorded)",
+    "single_ped": "1 person 0.83 + mask, infer ~55ms",
+    "three_peds": "3 persons 0.87/0.84/0.68 + masks, infer ~15-24ms"
+  },
+  "multiclass_sim_rgb": {
+    "frame": "data/rgbd_rgb.png (real Isaac Sim RGB frame)",
+    "detections": [
+      "chair 0.81",
+      "dining table 0.67",
+      "chair 0.59",
+      "chair 0.57",
+      "chair 0.50"
+    ],
+    "evidence": "data/yolo_scenario_validation/multiclass_sim_lab_view.png"
+  },
+  "multiclass_lab_refs": {
+    "lab_ref_00": [
+      "chair 0.92",
+      "person 0.67"
+    ],
+    "lab_ref_01": [
+      "chair 0.92",
+      "chair 0.62",
+      "chair 0.54"
+    ]
+  },
+  "ros_pipeline_live": {
+    "nodes": [
+      "yolo_seg_node (classes=[0,13,56,57,60])",
+      "rgbd_fusion_node"
+    ],
+    "input": "archived sim RGB + synthetic 4.0m depth + K(575.66) published at 10Hz",
+    "detections_2d": [
+      "56:chair 0.81",
+      "60:dining table 0.67",
+      "56:chair 0.59/0.57/0.50"
+    ],
+    "objects_3d": "5/5 objects, z=4.0m each (mask-median of synthetic plane)",
+    "note": "default 0.1s sync_tolerance drops pairs at 10Hz pub rate (detection latency); verified with 0.6s override config; live sim publishes 35Hz so unaffected"
+  },
+  "scenario_table": [
+    {
+      "id": "01",
+      "yaml_objects": [
+        "person(0,-2)"
+      ],
+      "visibility": "NOT-VISIBLE (146deg behind camera)",
+      "classes": [
+        "person"
+      ]
+    },
+    {
+      "id": "02",
+      "yaml_objects": [
+        "person(10,-6)"
+      ],
+      "visibility": "VISIBLE 4m dead-ahead",
+      "classes": [
+        "person"
+      ]
+    },
+    {
+      "id": "03",
+      "yaml_objects": [
+        "person(10,-3)"
+      ],
+      "visibility": "MARGINAL 37deg left (FOV edge 35deg)",
+      "classes": [
+        "person"
+      ]
+    },
+    {
+      "id": "04",
+      "yaml_objects": [
+        "person(10,-9)"
+      ],
+      "visibility": "MARGINAL 37deg right",
+      "classes": [
+        "person"
+      ]
+    },
+    {
+      "id": "05",
+      "yaml_objects": [
+        "person crossing L->R"
+      ],
+      "visibility": "VISIBLE part of crossing",
+      "classes": [
+        "person"
+      ]
+    },
+    {
+      "id": "06",
+      "yaml_objects": [
+        "person crossing R->L"
+      ],
+      "visibility": "VISIBLE then exits",
+      "classes": [
+        "person"
+      ]
+    },
+    {
+      "id": "07",
+      "yaml_objects": [
+        "person approaching 14m"
+      ],
+      "visibility": "VISIBLE once within 10m",
+      "classes": [
+        "person"
+      ]
+    },
+    {
+      "id": "08",
+      "yaml_objects": [
+        "person(10,-4)",
+        "person(14,-8)"
+      ],
+      "visibility": "BOTH VISIBLE",
+      "classes": [
+        "person x2"
+      ]
+    },
+    {
+      "id": "09",
+      "yaml_objects": [
+        "person(-8,-10)",
+        "chair(-8,-10.8)"
+      ],
+      "visibility": "NOT-VISIBLE (14m behind); YAML statics NOT spawned by runner; lab furniture TBD live",
+      "classes": [
+        "person",
+        "chair"
+      ]
+    },
+    {
+      "id": "10",
+      "yaml_objects": [
+        "person(-10,6)",
+        "table(-10,8)"
+      ],
+      "visibility": "NOT-VISIBLE (20m behind-left); lab furniture TBD live",
+      "classes": [
+        "person",
+        "dining table"
+      ]
+    },
+    {
+      "id": "11",
+      "yaml_objects": [
+        "person(-3,3)->(12,3)"
+      ],
+      "visibility": "VISIBLE once in FOV",
+      "classes": [
+        "person"
+      ]
+    },
+    {
+      "id": "12",
+      "yaml_objects": [
+        "3 persons + chair/table/column statics"
+      ],
+      "visibility": "12b VISIBLE; 12a 56deg NOT visible; 12c enters range; statics NOT spawned",
+      "classes": [
+        "person",
+        "chair",
+        "dining table"
+      ]
+    }
+  ],
+  "live_12_status": "BLOCKED-ENVIRONMENT: bridge publishes /clock+/tf but NO camera topics (4 runs incl. proven fidelity path, GUI+headless). Replicator render-product writer-attach fails ('unknown dtype'); GPU at 90C/100% by unrelated 2-day training job (PID 6056, 34GB, NOT to be touched). Sim-side runner + external validator code complete and smoke-verified up to frame capture.",
+  "regressions": {
+    "verify_ackermann_physics": "15/15",
+    "verify_vehicle_complete": "56/56",
+    "test_m8_scenarios": "11/11"
+  },
+  "planning_status": "NOT ACTIVATED: no planner node launched, no /cmd_ackermann published anywhere in this phase (verified by grep)"
+}

@@ -1,0 +1,45 @@
+# Scenario S11: Obstacle Leaves the Route
+# Objective: Pedestrian initially stands directly in route at (10.0, -6.0).
+# Pedestrian walks away towards (10.0, -8.5); corridor clears; vehicle resumes and reaches destination.
+
+scenario_name: scenario_s11_obstacle_leaves_route
+description: "Temporary obstruction: pedestrian occupies route, then walks away; vehicle resumes."
+
+vehicle_start_pose:
+  - 6.0
+  - -6.0
+  - 0.35
+  - 0.0
+
+vehicle_destination_pose:
+  - 13.5
+  - -6.0
+  - 0.0
+
+pedestrians:
+  - pedestrian_id: ped_leaves_route_01
+    type: crossing
+    initial_position:
+      - 10.0
+      - -6.0
+      - 0.0
+    initial_orientation: -1.5708
+    velocity: 0.50
+    trajectory_duration: 25.0
+    start_delay: 3.0
+    height: 1.75
+    shoulder_width: 0.45
+    capsule_radius: 0.28
+    variant_idx: 0
+    human_tier: s3
+    animation: walk
+    is_realistic: true
+    is_real_human: true
+    use_real_human: true
+    wait_time: 0.0
+    destination:
+      - 10.0
+      - -7.1
+      - 0.0
+
+static_obstacles: []

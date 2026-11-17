@@ -1,0 +1,35 @@
+{
+  "tc_id": "B",
+  "scenario_start": [
+    7.5,
+    -4.0,
+    0.35,
+    -0.3217505543966422
+  ],
+  "physical_spawn_pos": [
+    7.5,
+    -4.0,
+    0.3499999940395355
+  ],
+  "physical_spawn_rot": [
+    0.9870874285697937,
+    0.0,
+    0.0,
+    -0.16018223762512207
+  ],
+  "physical_yaw_rad": -0.3217505343923287,
+  "physical_yaw_deg": -18.434947676759275,
+  "expected_yaw_deg": -18.43494882292201,
+  "usd_chassis_pos": [
+    7.499981880187988,
+    -3.9999949932098393,
+    0.3500041961669922
+  ],
+  "pos_after_20_steps": [
+    7.499981880187988,
+    -3.999994993209839,
+    0.3500041961669922
+  ],
+  "drift_m": 1.8798817384549577e-05,
+  "sim_screenshot": "/home/ubuntu/SKATEBOARD_IRP/data/spawn_investigation_nov16/b_sim_physical_spawn.png"
+}

@@ -12,6 +12,7 @@ import json
 import time
 
 sys.path.insert(0, "/home/ubuntu/SKATEBOARD_IRP")
+sys.path.insert(0, "/home/ubuntu/SKATEBOARD_IRP/ros2_ws/src/rgbd_perception")
 
 parser = argparse.ArgumentParser(description="Closed-loop camera-only autonomy")
 parser.add_argument("--headless", action="store_true", default=False)
@@ -156,6 +157,10 @@ _iou = float(_pc["iou_threshold"])
 _imgsz = int(_pc["image_size"])
 _half = bool(_pc["half_precision"]) and True  # CUDA available
 _target = set(int(c) for c in _pc["target_classes"])
+# Canonical application labels via rgbd_perception.config (single mapping layer).
+from rgbd_perception.config import application_label as _canonical_label
+def _app_label(cid, model_name):
+    return _canonical_label(_pc, cid, model_name)
 try:
     _yolo.predict(np.zeros((480, 640, 3), dtype=np.uint8), verbose=False, device="cuda:0", half=True, imgsz=640)
 except Exception:
@@ -558,7 +563,8 @@ def _predict(rgb):
             yield {
                 "bbox": (x1, y1, x2, y2),
                 "class_id": cid,
-                "class_name": str(_names.get(cid, "class_%d" % cid)),
+                # Canonical application label (60 -> "table"); IDs unchanged.
+                "class_name": _app_label(cid, str(_names.get(cid, "class_%d" % cid))),
                 "confidence": float(cnf[i]),
                 "mask": mk,
             }

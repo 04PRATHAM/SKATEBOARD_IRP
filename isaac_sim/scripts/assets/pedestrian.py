@@ -159,6 +159,15 @@ class Pedestrian:
         # Mass API for physics interactions
         mass_api = UsdPhysics.MassAPI.Apply(coll_prim.GetPrim())
         mass_api.CreateMassAttr().Set(75.0)  # typical adult mass in kg
+
+        # PhysX solver iterations for better contact resolution
+        try:
+            from pxr import PhysxSchema
+            physx_rb = PhysxSchema.PhysxRigidBodyAPI.Apply(coll_prim.GetPrim())
+            physx_rb.CreateSolverPositionIterationCountAttr().Set(16)
+            physx_rb.CreateSolverVelocityIterationCountAttr().Set(8)
+        except Exception:
+            pass
         
         # Hide collision capsule from renderer (only visual torso/head visible)
         UsdGeom.Imageable(coll_prim.GetPrim()).MakeInvisible()

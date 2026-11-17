@@ -21,6 +21,7 @@ sys.path.insert(0, "/home/ubuntu/SKATEBOARD_IRP/ros2_ws/src/rgbd_perception")
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from vision_msgs.msg import Detection2DArray, Detection2D, ObjectHypothesisWithPose
 
@@ -43,12 +44,13 @@ class YoloSegNode(Node):
             model_path=pc["model_path"], device=pc["device"], conf=pc["confidence_threshold"],
             iou=pc["iou_threshold"], imgsz=pc["image_size"], half=pc["half_precision"],
             target_classes=tuple(pc["target_classes"]),
-            class_names_override=pc.get("class_names_override") or {})
+            class_names_override=pc.get("class_names_override") or {},
+            app_names=pc.get("application_class_names") or {})
         self.get_logger().info("YOLO task=segment device=%s classes=%s" % (
             self.det.device, sorted(self.det.target_classes)))
         self.pub_det = self.create_publisher(Detection2DArray, tp["detections"], 10)
         self.pub_mask = self.create_publisher(Image, "/perception/masks", 10)
-        self.create_subscription(Image, tp["rgb"], self.on_rgb, 10)
+        self.create_subscription(Image, tp["rgb"], self.on_rgb, qos_profile_sensor_data)
         self.min_period = 1.0 / max(float(pc.get("perception_rate", 10.0)), 0.1)
         self.busy = False
         self.stats = {"frames": 0, "drops": 0, "n_det": 0}

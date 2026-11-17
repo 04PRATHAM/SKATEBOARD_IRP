@@ -5,6 +5,7 @@ Launched as subprocess from main autonomy script. Communicates via JSON files.
 """
 import sys, os, json, time, math
 sys.path.insert(0, "/home/ubuntu/SKATEBOARD_IRP")
+sys.path.insert(0, "/home/ubuntu/SKATEBOARD_IRP/ros2_ws/src/rgbd_perception")
 
 import numpy as np
 import cv2
@@ -26,6 +27,10 @@ _iou = float(_pc["iou_threshold"])
 _imgsz = int(_pc["image_size"])
 _half = bool(_pc["half_precision"])
 _target = set(int(c) for c in _pc["target_classes"])
+# Canonical application labels via rgbd_perception.config (single mapping layer).
+from rgbd_perception.config import application_label as _canonical_label
+def _app_label(cid, model_name):
+    return _canonical_label(_pc, cid, model_name)
 
 # Warmup
 try:
@@ -93,7 +98,8 @@ def _predict(rgb):
             yield {
                 "bbox": (x1, y1, x2, y2),
                 "class_id": cid,
-                "class_name": str(_names.get(cid, f"class_{cid}")),
+                # Canonical application label (60 -> "table"); IDs unchanged.
+                "class_name": _app_label(cid, str(_names.get(cid, f"class_{cid}"))),
                 "confidence": float(cnf[i]),
                 "mask": mk,
             }

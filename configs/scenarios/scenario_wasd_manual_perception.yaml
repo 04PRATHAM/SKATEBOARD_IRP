@@ -1,0 +1,63 @@
+# Scenario: WASD manual drive + live YOLO perception (segmented pedestrian tier)
+# Uses the 'segmented' human tier (primitive-assembly: head/torso/arms/legs + sinusoidal walk)
+# which works reliably in Isaac Sim 6.2 WITHOUT requiring omni.anim.graph.core or S3 assets.
+# The pedestrian has visible walking animation (limb swing) and solid collision physics.
+#
+# Use this scenario for:
+#   - Manual WASD driving tests with live YOLO perception
+#   - Tests M1-M10 (collision, animation, multi-class)
+#   - Quick iteration that does not require S3 asset download
+
+scenario_name: scenario_wasd_manual_perception
+description: >
+  Single approaching pedestrian (segmented tier, working 6.2 walk animation)
+  for manual WASD driving + live YOLO26n-seg + RGB-D depth fusion testing.
+  Pedestrian walks from 9.0m to 6.5m (within camera 10m far-clip).
+
+vehicle_start_pose:
+  - 6.0    # x
+  - -6.0   # y
+  - 0.35   # z
+  - 0.0    # yaw
+
+pedestrians:
+  - pedestrian_id: person_wasd_01
+    type: approaching
+    initial_position:
+      - 10.5
+      - -6.0
+      - 0.0
+    initial_orientation: 3.14159   # rad — facing vehicle (180°)
+    velocity: 0.5
+    trajectory_duration: 30.0
+    start_delay: 0.0
+    height: 1.75
+    shoulder_width: 0.45
+    capsule_radius: 0.22
+    color:
+      - 0.18
+      - 0.32
+      - 0.68
+    variant_idx: 0
+    human_tier: s3          # Photoreal S3 human with native OpenUSD skeletal walk & collision
+    animation: walk
+    is_realistic: true
+    is_real_human: true
+    use_real_human: true
+    wait_time: 0.0
+    destination:
+      - 7.0
+      - -6.0
+      - 0.0
+
+static_obstacles: []
+environment_region: approach_zone
+expected_interaction_area:
+  min_x: 6.0
+  max_x: 15.0
+  min_y: -7.0
+  max_y: -5.0
+random_seed: 42
+is_realistic: true
+navmesh_enabled: false
+pedestrian_realism: segmented

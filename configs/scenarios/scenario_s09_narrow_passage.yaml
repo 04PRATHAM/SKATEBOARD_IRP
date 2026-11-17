@@ -1,0 +1,41 @@
+# Scenario S09: Narrow Passage
+# Objective: Two tables create a narrow passage (gap 1.7m) along the corridor.
+# Planner checks vehicle footprint, centers through narrow corridor, and reaches destination.
+
+scenario_name: scenario_s09_narrow_passage
+description: Narrow passage between two static obstacles; footprint clearance verified.
+
+vehicle_start_pose:
+  - 6.0
+  - -6.0
+  - 0.35
+  - 0.0
+
+vehicle_destination_pose:
+  - 13.5
+  - -6.0
+  - 0.0
+
+pedestrians: []
+
+static_obstacles:
+  - object_type: table
+    object_id: left_table_barrier
+    position:
+      - 10.0
+      - -4.9
+      - 0.0
+    dimensions:
+      - 1.4
+      - 0.8
+      - 0.75
+  - object_type: table
+    object_id: right_table_barrier
+    position:
+      - 10.0
+      - -7.1
+      - 0.0
+    dimensions:
+      - 1.4
+      - 0.8
+      - 0.75

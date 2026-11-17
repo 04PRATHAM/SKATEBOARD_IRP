@@ -1,0 +1,37 @@
+# Scenario S03: Multiple Static Obstacles
+# Objective: Several objects block different route sections (table at (9.5, -6.1) and chair at (11.5, -5.2)).
+# Vehicle plans an obstacle-free weave route and reaches (13.5, -6.0).
+
+scenario_name: scenario_s03_multiple_static_obstacles
+description: Autonomous navigation through multiple static obstacles (table and chair).
+
+vehicle_start_pose:
+  - 6.0
+  - -6.0
+  - 0.35
+  - 0.0
+
+vehicle_destination_pose:
+  - 13.5
+  - -6.0
+  - 0.0
+
+pedestrians: []
+
+static_obstacles:
+  - object_type: table
+    object_id: static_table_01
+    position:
+      - 9.5
+      - -6.1
+      - 0.0
+    dimensions:
+      - 1.4
+      - 0.8
+      - 0.75
+  - object_type: chair
+    object_id: static_chair_02
+    position:
+      - 11.5
+      - -5.2
+      - 0.0

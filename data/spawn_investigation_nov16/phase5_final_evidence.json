@@ -1,0 +1,39 @@
+{
+  "scenario": "scenario_s02_one_static_obstacle",
+  "selected_start": [
+    6.0,
+    -6.0,
+    0.0
+  ],
+  "selected_goal": [
+    13.5,
+    -6.0
+  ],
+  "physical_spawn_pos": [
+    6.0,
+    -6.0,
+    0.3499999940395355
+  ],
+  "hold_drift_mm": 0.452,
+  "physical_displacement_m": 0.4811,
+  "final_physical_pos": [
+    6.479887962341309,
+    -6.03448486328125,
+    0.3501812815666199
+  ],
+  "odometry_init": [
+    6.0,
+    -6.0,
+    0.0
+  ],
+  "planner_start": [
+    6.0,
+    -6.0
+  ],
+  "planner_goal": [
+    13.5,
+    -6.0
+  ],
+  "detour_state": "REPLAN_OFFSET_+1.9m",
+  "status": "PASS"
+}

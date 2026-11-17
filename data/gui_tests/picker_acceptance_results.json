@@ -1,0 +1,52 @@
+{
+  "test_a": {
+    "scenario": "s02",
+    "start": [
+      6.0,
+      -6.0
+    ],
+    "goal": [
+      13.5,
+      -6.0
+    ],
+    "pixel_start": [
+      704,
+      576
+    ],
+    "pixel_goal": [
+      946,
+      576
+    ],
+    "error_s_mm": 42.43,
+    "error_g_mm": 30.0,
+    "route_points": 32,
+    "route_max_y": -5.55,
+    "screenshot": "/home/ubuntu/SKATEBOARD_IRP/data/gui_tests/test_a_picker_s02.png",
+    "status": "PASS"
+  },
+  "test_b": {
+    "scenario": "s02",
+    "start": [
+      7.5,
+      -5.5
+    ],
+    "goal": [
+      13.0,
+      -6.0
+    ],
+    "pixel_start": [
+      753,
+      563
+    ],
+    "pixel_goal": [
+      930,
+      576
+    ],
+    "error_s_mm": 14.14,
+    "error_g_mm": 30.0,
+    "route_points": 24,
+    "route_max_y": -5.5,
+    "screenshot": "/home/ubuntu/SKATEBOARD_IRP/data/gui_tests/test_b_picker_s02.png",
+    "status": "PASS"
+  }
+}

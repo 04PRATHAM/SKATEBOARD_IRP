@@ -1,0 +1,179 @@
+{
+  "summary": {
+    "rates_hz": {
+      "rgb": 42.59,
+      "depth": 42.6,
+      "info": 42.6,
+      "det": 9.09,
+      "mask": 9.17,
+      "obj": 9.09
+    },
+    "counts": {
+      "rgb": 596,
+      "depth": 596,
+      "info": 596,
+      "det": 99,
+      "mask": 99,
+      "obj": 99
+    },
+    "total_3d_observations": 13,
+    "pedestrian_analysis": {
+      "count": 13,
+      "first_detected_sim_time": 1.71,
+      "last_detected_sim_time": 2.33,
+      "initial_depth_m": 1.631,
+      "final_depth_m": 0.543,
+      "min_depth_m": 0.543,
+      "max_depth_m": 1.631,
+      "initial_distance_m": 1.631,
+      "final_distance_m": 0.544,
+      "min_distance_m": 0.544,
+      "max_distance_m": 1.631
+    }
+  },
+  "observations": [
+    {
+      "wall_time": 3.176,
+      "sim_time": 1.71,
+      "class_id": 0,
+      "label": "person",
+      "confidence": 0.677,
+      "optical_x": 0.006,
+      "optical_y": 0.013,
+      "optical_z": 1.631,
+      "distance": 1.631
+    },
+    {
+      "wall_time": 3.286,
+      "sim_time": 1.75,
+      "class_id": 0,
+      "label": "person",
+      "confidence": 0.682,
+      "optical_x": -0.013,
+      "optical_y": 0.006,
+      "optical_z": 1.614,
+      "distance": 1.614
+    },
+    {
+      "wall_time": 3.374,
+      "sim_time": 1.8,
+      "class_id": 0,
+      "label": "person",
+      "confidence": 0.667,
+      "optical_x": -0.013,
+      "optical_y": -0.01,
+      "optical_z": 1.522,
+      "distance": 1.522
+    },
+    {
+      "wall_time": 3.48,
+      "sim_time": 1.85,
+      "class_id": 0,
+      "label": "person",
+      "confidence": 0.728,
+      "optical_x": -0.026,
+      "optical_y": -0.01,
+      "optical_z": 1.427,
+      "distance": 1.427
+    },
+    {
+      "wall_time": 3.584,
+      "sim_time": 1.9,
+      "class_id": 0,
+      "label": "person",
+      "confidence": 0.72,
+      "optical_x": -0.039,
+      "optical_y": -0.003,
+      "optical_z": 1.335,
+      "distance": 1.336
+    },
+    {
+      "wall_time": 3.689,
+      "sim_time": 1.95,
+      "class_id": 0,
+      "label": "person",
+      "confidence": 0.81,
+      "optical_x": -0.069,
+      "optical_y": -0.017,
+      "optical_z": 1.245,
+      "distance": 1.247
+    },
+    {
+      "wall_time": 3.805,
+      "sim_time": 2.0,
+      "class_id": 0,
+      "label": "person",
+      "confidence": 0.831,
+      "optical_x": -0.065,
+      "optical_y": -0.02,
+      "optical_z": 1.152,
+      "distance": 1.154
+    },
+    {
+      "wall_time": 3.904,
+      "sim_time": 2.04,
+      "class_id": 0,
+      "label": "person",
+      "confidence": 0.802,
+      "optical_x": -0.058,
+      "optical_y": -0.015,
+      "optical_z": 1.079,
+      "distance": 1.081
+    },
+    {
+      "wall_time": 4.021,
+      "sim_time": 2.09,
+      "class_id": 0,
+      "label": "person",
+      "confidence": 0.799,
+      "optical_x": -0.042,
+      "optical_y": -0.012,
+      "optical_z": 0.987,
+      "distance": 0.988
+    },
+    {
+      "wall_time": 4.132,
+      "sim_time": 2.14,
+      "class_id": 0,
+      "label": "person",
+      "confidence": 0.798,
+      "optical_x": -0.04,
+      "optical_y": -0.01,
+      "optical_z": 0.896,
+      "distance": 0.897
+    },
+    {
+      "wall_time": 4.233,
+      "sim_time": 2.19,
+      "class_id": 0,
+      "label": "person",
+      "confidence": 0.738,
+      "optical_x": -0.039,
+      "optical_y": -0.011,
+      "optical_z": 0.806,
+      "distance": 0.807
+    },
+    {
+      "wall_time": 4.352,
+      "sim_time": 2.24,
+      "class_id": 0,
+      "label": "person",
+      "confidence": 0.366,
+      "optical_x": -0.038,
+      "optical_y": -0.009,
+      "optical_z": 0.715,
+      "distance": 0.716
+    },
+    {
+      "wall_time": 4.574,
+      "sim_time": 2.33,
+      "class_id": 0,
+      "label": "person",
+      "confidence": 0.367,
+      "optical_x": -0.031,
+      "optical_y": -0.006,
+      "optical_z": 0.543,
+      "distance": 0.544
+    }
+  ]
+}

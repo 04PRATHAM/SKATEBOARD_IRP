@@ -31,6 +31,7 @@ pedestrians:
   - 0.5
   - 0.1
   variant_idx: 0
+  human_tier: segmented
   animation: walk
   is_realistic: true
   wait_time: 2.0

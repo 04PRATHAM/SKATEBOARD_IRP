@@ -33,6 +33,7 @@ def create_lab_table(stage, path, translation, scale=(1.5, 0.8, 0.75), color=Non
     # Table top
     top_path = f"{path}/Top"
     top_prim = define_prim(top_path, "Cube")
+    UsdGeom.Cube(top_prim).CreateSizeAttr().Set(1.0)
     xformable = UsdGeom.Xformable(top_prim)
     xformable.AddTranslateOp().Set(Gf.Vec3d(x, y, z + height - 0.04))  # Top at height
     xformable.AddScaleOp().Set(Gf.Vec3d(length, width, 0.08))
@@ -54,7 +55,7 @@ def create_lab_table(stage, path, translation, scale=(1.5, 0.8, 0.75), color=Non
         leg_prim = define_prim(f"{path}/Leg_{i}", "Cylinder")
         leg_xform = UsdGeom.Xformable(leg_prim)
         leg_xform.AddTranslateOp().Set(Gf.Vec3d(lx, ly, z + leg_height / 2.0))
-        leg_xform.AddRotateXYZOp().Set(Gf.Vec3d(90, 0, 0))
+        # USD Cylinder default axis is Z (vertical); no rotation needed for vertical table legs
         leg_prim.GetAttribute("radius").Set(leg_radius)
         leg_prim.GetAttribute("height").Set(leg_height)
         
@@ -107,7 +108,6 @@ def create_office_chair(stage, path, translation, color=None):
     seat_prim = define_prim(f"{path}/Seat", "Cylinder")
     seat_xform = UsdGeom.Xformable(seat_prim)
     seat_xform.AddTranslateOp().Set(Gf.Vec3d(x, y, z + seat_height))
-    seat_xform.AddRotateXYZOp().Set(Gf.Vec3d(90, 0, 0))
     seat_prim.GetAttribute("radius").Set(0.25)
     seat_prim.GetAttribute("height").Set(0.08)
     UsdPhysics.CollisionAPI.Apply(seat_prim.GetPrim())
@@ -125,7 +125,6 @@ def create_office_chair(stage, path, translation, color=None):
     base_prim = define_prim(f"{path}/Base", "Cylinder")
     base_xform = UsdGeom.Xformable(base_prim)
     base_xform.AddTranslateOp().Set(Gf.Vec3d(x, y, z + base_height/2.0))
-    base_xform.AddRotateXYZOp().Set(Gf.Vec3d(90, 0, 0))
     base_prim.GetAttribute("radius").Set(0.35)
     base_prim.GetAttribute("height").Set(0.05)
     UsdPhysics.CollisionAPI.Apply(base_prim.GetPrim())
@@ -134,7 +133,6 @@ def create_office_chair(stage, path, translation, color=None):
     col_prim = define_prim(f"{path}/Column", "Cylinder")
     col_xform = UsdGeom.Xformable(col_prim)
     col_xform.AddTranslateOp().Set(Gf.Vec3d(x, y, z + 0.2))
-    col_xform.AddRotateXYZOp().Set(Gf.Vec3d(90, 0, 0))
     col_prim.GetAttribute("radius").Set(0.06)
     col_prim.GetAttribute("height").Set(0.4)
     UsdPhysics.CollisionAPI.Apply(col_prim.GetPrim())

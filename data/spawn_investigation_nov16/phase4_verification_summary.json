@@ -1,0 +1,50 @@
+[
+  {
+    "test_case": "Test A",
+    "selected_start": "(6.00, -6.00, yaw=0.0\u00b0)",
+    "scenario_start": "(6.00, -6.00, yaw=0.0\u00b0)",
+    "physical_spawn_pos": "(6.0000, -6.0000, z=0.3500)",
+    "initial_heading": "0.00\u00b0 (expected 0.00\u00b0)",
+    "initial_odometry": "(6.00, -6.00, yaw=0.0\u00b0)",
+    "planner_start": "(6.00, -6.00)",
+    "visualizer_start": "(6.00, -6.00)",
+    "pos_error_m": 0.0,
+    "yaw_error_deg": 0.0,
+    "step_drift_mm": 0.29,
+    "picker_screenshot": "/home/ubuntu/SKATEBOARD_IRP/data/spawn_investigation_nov16/a_point_picker.png",
+    "sim_screenshot": "/home/ubuntu/SKATEBOARD_IRP/data/spawn_investigation_nov16/a_sim_physical_spawn.png",
+    "status": "PASS"
+  },
+  {
+    "test_case": "Test B",
+    "selected_start": "(7.50, -4.00, yaw=-18.4\u00b0)",
+    "scenario_start": "(7.50, -4.00, yaw=-18.4\u00b0)",
+    "physical_spawn_pos": "(7.5000, -4.0000, z=0.3500)",
+    "initial_heading": "-18.43\u00b0 (expected -18.43\u00b0)",
+    "initial_odometry": "(7.50, -4.00, yaw=-18.4\u00b0)",
+    "planner_start": "(7.50, -4.00)",
+    "visualizer_start": "(7.50, -4.00)",
+    "pos_error_m": 0.0,
+    "yaw_error_deg": 0.0,
+    "step_drift_mm": 0.019,
+    "picker_screenshot": "/home/ubuntu/SKATEBOARD_IRP/data/spawn_investigation_nov16/b_point_picker.png",
+    "sim_screenshot": "/home/ubuntu/SKATEBOARD_IRP/data/spawn_investigation_nov16/b_sim_physical_spawn.png",
+    "status": "PASS"
+  },
+  {
+    "test_case": "Test C",
+    "selected_start": "(5.00, -5.00, yaw=0.0\u00b0)",
+    "scenario_start": "(5.00, -5.00, yaw=0.0\u00b0)",
+    "physical_spawn_pos": "(5.0000, -5.0000, z=0.3500)",
+    "initial_heading": "0.00\u00b0 (expected 0.00\u00b0)",
+    "initial_odometry": "(5.00, -5.00, yaw=0.0\u00b0)",
+    "planner_start": "(5.00, -5.00)",
+    "visualizer_start": "(5.00, -5.00)",
+    "pos_error_m": 0.0,
+    "yaw_error_deg": 0.0,
+    "step_drift_mm": 0.089,
+    "picker_screenshot": "/home/ubuntu/SKATEBOARD_IRP/data/spawn_investigation_nov16/c_point_picker.png",
+    "sim_screenshot": "/home/ubuntu/SKATEBOARD_IRP/data/spawn_investigation_nov16/c_sim_physical_spawn.png",
+    "status": "PASS"
+  }
+]

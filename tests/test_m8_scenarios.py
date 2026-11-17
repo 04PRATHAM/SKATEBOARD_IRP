@@ -28,7 +28,9 @@ from isaacsim import SimulationApp
 sim = SimulationApp({"headless": True, "renderer": "RayTracedLighting"})
 
 import time
+# pyrefly: ignore [missing-import]
 from pxr import Usd, UsdGeom, UsdPhysics, Gf
+# pyrefly: ignore [missing-import]
 import omni.usd
 
 from isaac_sim.scripts.utils.world_setup import build_world
@@ -578,14 +580,14 @@ def run_all_tests():
             import traceback
             traceback.print_exc()
     
-    print(f"\n{'='*60}", flush=True)
-    print(f"M8 TEST RESULTS: {passed}/{len(tests)} PASSED", flush=True)
-    print(f"{'='*60}", flush=True)
+    print(f"\n{'='*60}")
+    print(f"M8 TEST RESULTS: {passed}/{len(tests)} PASSED")
+    print(f"{'='*60}")
     
     if errors:
-        print("FAILURES:", flush=True)
+        print("FAILURES:")
         for err in errors:
-            print(f"  - {err}", flush=True)
+            print(f"  - {err}")
     
     return failed == 0
 

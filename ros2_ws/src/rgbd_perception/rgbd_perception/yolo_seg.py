@@ -11,6 +11,8 @@ Portability: pure function of (image, config); no simulator/ROS imports here.
 The ROS node lives in yolo_seg_node.py. Same file runs on the real vehicle.
 """
 import time
+import warnings
+warnings.filterwarnings("ignore", message=".*'half' is deprecated.*")
 
 from isaac_sim.scripts.perception.rgbd_interface import Detection2D
 
@@ -18,7 +20,8 @@ from isaac_sim.scripts.perception.rgbd_interface import Detection2D
 class YoloSegDetector:
     def __init__(self, model_path="yolo26n-seg.pt", device="cuda:0",
                  conf=0.35, iou=0.7, imgsz=640, half=True,
-                 target_classes=(0,), class_names_override=None):
+                 target_classes=(0,), class_names_override=None,
+                 app_names=None):
         from ultralytics import YOLO
         import torch
         if device.startswith("cuda") and not torch.cuda.is_available():
@@ -33,6 +36,14 @@ class YoloSegDetector:
                           else getattr(self.model, "names", {}))
         if class_names_override:
             self.names.update({int(k): str(v) for k, v in class_names_override.items()})
+        # Application-facing labels (e.g. 60 -> "table"): canonical layer only.
+        # Class IDs are never changed; model weights untouched.
+        self.app_names = {}
+        try:
+            for k, v in dict(app_names or {}).items():
+                self.app_names[int(k)] = str(v)
+        except Exception:
+            pass
         self.conf = float(conf)
         self.iou = float(iou)
         self.imgsz = int(imgsz)
@@ -87,7 +98,8 @@ class YoloSegDetector:
                         mk = None
                 dets.append(Detection2D(
                     bbox=(x1, y1, x2, y2),
-                    class_name=str(self.names.get(cid, "class_%d" % cid)),
+                    class_name=str(self.app_names.get(
+                        cid, self.names.get(cid, "class_%d" % cid))),
                     confidence=float(cnf[i]),
                     object_id=i,
                     class_id=cid,

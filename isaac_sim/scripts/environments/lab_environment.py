@@ -27,8 +27,11 @@ def create_lab_environment(world, vehicle_cfg: dict, glass_has_collision: bool =
         glass_has_collision: If True, glass partitions are solid obstacles.
             If False, glass is visual-only (for motion-test corridors).
     """
+    # pyrefly: ignore [missing-import]
     from pxr import Usd, UsdGeom, UsdPhysics, UsdLux, Gf, Sdf
+    # pyrefly: ignore [missing-import]
     import omni.usd
+    # pyrefly: ignore [missing-import]
     from isaacsim.core.utils.prims import define_prim, get_prim_at_path
     
     stage = omni.usd.get_context().get_stage()
@@ -79,7 +82,8 @@ def create_lab_environment(world, vehicle_cfg: dict, glass_has_collision: bool =
     safe_define_prim(f"{furniture_path}/Tables", "Xform")
 
     # Helper for metric cubes; has_collision=False for visual-only deco (tile lines)
-    def create_cube(path, translation, scale, color=None, kinematic=True, has_collision=True):
+    # Static architecture uses kinematic=False so PhysX creates true static colliders.
+    def create_cube(path, translation, scale, color=None, kinematic=False, has_collision=True):
         prim = safe_define_prim(path, "Cube")
         cube_geom = UsdGeom.Cube(prim)
         cube_geom.CreateSizeAttr().Set(1.0)
@@ -107,6 +111,13 @@ def create_lab_environment(world, vehicle_cfg: dict, glass_has_collision: bool =
             if kinematic:
                 rigid_api = UsdPhysics.RigidBodyAPI.Apply(prim.GetPrim())
                 rigid_api.CreateKinematicEnabledAttr().Set(True)
+            try:
+                from pxr import PhysxSchema
+                p_col = PhysxSchema.PhysxCollisionAPI.Apply(prim.GetPrim())
+                p_col.CreateContactOffsetAttr().Set(0.04)
+                p_col.CreateRestOffsetAttr().Set(0.0)
+            except Exception:
+                pass
         return prim
 
     def create_cylinder(path, translation, radius, height, orientation=None, color=None):
@@ -156,6 +167,7 @@ def create_lab_environment(world, vehicle_cfg: dict, glass_has_collision: bool =
     gp_prim = stage.GetPrimAtPath(f"{floor_path}/PhysicsGroundPlane")
     if not gp_prim.IsValid():
         try:
+            # pyrefly: ignore [missing-import]
             from isaacsim.core.api.objects import GroundPlane
             GroundPlane(f"{floor_path}/PhysicsGroundPlane", z_position=0.0, visible=False)
             print("[INFO] Physics ground plane (infinite, z=0) created for stable wheel contact.")
@@ -163,6 +175,7 @@ def create_lab_environment(world, vehicle_cfg: dict, glass_has_collision: bool =
             # Fallback: give the visual floor cube collision back so the vehicle
             # still has *something* to rest on if the ground-plane helper is absent.
             print(f"[WARN] GroundPlane helper unavailable ({e}); re-enabling box floor collision.")
+            # pyrefly: ignore [missing-import]
             from pxr import UsdPhysics as _UsdPhysics
             _fp = get_prim_at_path(f"{floor_path}/Tile_Ground_Plane")
             if _fp and _fp.IsValid():
@@ -243,9 +256,10 @@ def create_lab_environment(world, vehicle_cfg: dict, glass_has_collision: bool =
     # `glass_has_collision` parameter passed to create_lab_environment.
     glass_h = 3.0
     glass_center_z = glass_h / 2.0
-    create_cube(f"{glass_path}/Glass_Office_L", (-5.0, -5.0, glass_center_z), (0.08, 10.0, glass_h), color_glass, has_collision=glass_has_collision)
-    create_cube(f"{glass_path}/Glass_Office_R", (5.0, 5.0, glass_center_z), (0.08, 10.0, glass_h), color_glass, has_collision=glass_has_collision)
-    create_cube(f"{glass_path}/Glass_Office_Rear", (-10.0, 0.0, glass_center_z), (0.08, 8.0, glass_h), color_glass, has_collision=glass_has_collision)
+    glass_t = 0.25  # robust solid collision barrier (25cm) to prevent vehicle tunneling
+    create_cube(f"{glass_path}/Glass_Office_L", (-5.0, -5.0, glass_center_z), (glass_t, 10.0, glass_h), color_glass, has_collision=glass_has_collision)
+    create_cube(f"{glass_path}/Glass_Office_R", (5.0, 5.0, glass_center_z), (glass_t, 10.0, glass_h), color_glass, has_collision=glass_has_collision)
+    create_cube(f"{glass_path}/Glass_Office_Rear", (-10.0, 0.0, glass_center_z), (glass_t, 8.0, glass_h), color_glass, has_collision=glass_has_collision)
 
     # ============================================================
     # 5. LAB FURNITURE (Work Tables, Computer Desks, Chairs)

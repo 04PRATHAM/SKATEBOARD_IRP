@@ -46,7 +46,9 @@ import rosbag2_py  # noqa: E402
 from rclpy.serialization import deserialize_message  # noqa: E402
 from sensor_msgs.msg import Image as RosImage, CameraInfo  # noqa: E402
 
+# pyrefly: ignore [missing-import]
 from rgbd_perception.yolo_seg import YoloSegDetector  # noqa: E402
+# pyrefly: ignore [missing-import]
 from rgbd_perception.config import load_config  # noqa: E402
 from isaac_sim.scripts.perception.rgbd_interface import (  # noqa: E402
     rgbd_fusion, _mask_depth)
@@ -127,7 +129,8 @@ else:
 
 # --- model ---------------------------------------------------------------
 det = YoloSegDetector(model_path=pc["model_path"], device=args.device,
-                      conf=args.conf, target_classes=tuple(pc["target_classes"]))
+                      conf=args.conf, target_classes=tuple(pc["target_classes"]),
+                      app_names=pc.get("application_class_names") or {})
 check("MODEL yolo26n-seg loads", True, "device=%s" % det.device)
 
 # --- per-frame RGB -> mask -> depth -> Object3D ---------------------------

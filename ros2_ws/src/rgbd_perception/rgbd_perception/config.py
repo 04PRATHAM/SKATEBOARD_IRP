@@ -11,9 +11,15 @@ _DEFAULTS = {
         "image_size": 640,
         "device": "cuda:0",
         "half_precision": True,
-        "target_classes": [0],
-        "obstacle_classes": [0],
+        "target_classes": [0, 13, 56, 57, 60],
+        "obstacle_classes": [0, 13, 56, 57, 60],
         "class_names_override": {},
+        # Application-facing labels (single canonical rename layer).
+        # Key = COCO class id (UNCHANGED, model weights untouched);
+        # value = label exposed to Detection2D/Object3D/viewer/logs/JSON.
+        # 60 is COCO "dining table" in the weights but "table" everywhere downstream.
+        "application_class_names": {0: "person", 13: "bench", 56: "chair",
+                                    57: "couch", 60: "table"},
         "depth_method": "mask_median",
         "trim_fraction": 0.1,
         "min_depth": 0.3,
@@ -54,6 +60,28 @@ _CANDIDATES = [
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..",
                  "configs", "perception.yaml"),
 ]
+
+
+def application_label(perception_cfg, class_id, model_name):
+    """CANONICAL application label for a COCO class id (single mapping layer).
+
+    Resolution order: application_class_names[id] -> class_names_override[id]
+    -> model_name. Class IDs are never altered here; only the display label.
+    All downstream output (Detection2D, Object3D, viewer, logs, JSON) must call
+    this instead of scattering str.replace() calls.
+    """
+    try:
+        app_names = perception_cfg.get("application_class_names") or {}
+        for key in (int(class_id), str(class_id)):
+            if key in app_names:
+                return str(app_names[key])
+        over = perception_cfg.get("class_names_override") or {}
+        for key in (int(class_id), str(class_id)):
+            if key in over:
+                return str(over[key])
+    except Exception:
+        pass
+    return str(model_name)
 
 
 def load_config(path=None):

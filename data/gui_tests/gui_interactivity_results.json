@@ -1,0 +1,10 @@
+{
+  "all_windows_detected": true,
+  "screenshots": {
+    "all_three_windows": "/home/ubuntu/SKATEBOARD_IRP/data/gui_tests/three_windows_active_s02.png",
+    "paused_state": "/home/ubuntu/SKATEBOARD_IRP/data/gui_tests/gui_pause_test.png",
+    "reset_state": "/home/ubuntu/SKATEBOARD_IRP/data/gui_tests/gui_reset_test.png",
+    "scenario_switched": "/home/ubuntu/SKATEBOARD_IRP/data/gui_tests/gui_scenario_switch_s04.png"
+  },
+  "status": "PASS"
+}

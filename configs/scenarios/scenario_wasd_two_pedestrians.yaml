@@ -1,0 +1,77 @@
+# Scenario: Two pedestrians, segmented tier, for Tests M7 + C5 (multiple pedestrian collision)
+scenario_name: scenario_wasd_two_pedestrians
+description: >
+  Two pedestrians using the segmented tier (reliable 6.2 walk animation + collision).
+  Person A approaches from ahead; Person B crosses left-to-right.
+  Both have solid collision capsules. Vehicle starts at (6,-6).
+
+vehicle_start_pose:
+  - 6.0
+  - -6.0
+  - 0.35
+  - 0.0
+
+pedestrians:
+  - pedestrian_id: person_wasd_02a
+    type: approaching
+    initial_position:
+      - 13.0
+      - -6.0
+      - 0.0
+    initial_orientation: 3.14159
+    velocity: 0.5
+    trajectory_duration: 22.0
+    start_delay: 0.0
+    height: 1.75
+    shoulder_width: 0.45
+    capsule_radius: 0.22
+    color:
+      - 0.2
+      - 0.55
+      - 0.8
+    variant_idx: 1
+    human_tier: segmented
+    animation: walk
+    is_realistic: true
+    destination:
+      - 7.5
+      - -6.0
+      - 0.0
+
+  - pedestrian_id: person_wasd_02b
+    type: crossing_left_to_right
+    initial_position:
+      - 10.0
+      - -10.0
+      - 0.0
+    initial_orientation: 1.5708   # 90 deg — facing positive Y (left to right crossing)
+    velocity: 0.8
+    trajectory_duration: 18.0
+    start_delay: 2.0
+    height: 1.68
+    shoulder_width: 0.43
+    capsule_radius: 0.21
+    color:
+      - 0.7
+      - 0.3
+      - 0.2
+    variant_idx: 4
+    human_tier: segmented
+    animation: walk
+    is_realistic: true
+    destination:
+      - 10.0
+      - -2.0
+      - 0.0
+
+static_obstacles: []
+environment_region: multi_person
+expected_interaction_area:
+  min_x: 6.0
+  max_x: 16.0
+  min_y: -11.0
+  max_y: -2.0
+random_seed: 7
+is_realistic: true
+navmesh_enabled: false
+pedestrian_realism: segmented

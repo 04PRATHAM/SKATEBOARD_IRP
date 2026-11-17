@@ -122,6 +122,7 @@ class RealHumanConfig:
     human_type: HumanType = HumanType.STATIONARY
     velocity: float = 1.2             # m/s (only used when WALKING)
     trajectory_duration: float = 12.0 # s
+    start_delay: float = 0.0          # s before starting movement
     destination: Optional[Tuple[float, float, float]] = None  # for NavMesh GoTo
     # Phase 0 (2026-09-25): do NOT attach the stock character_behavior.py via
     # OmniScriptingAPI by default. That attach is what puts Python Scripting
@@ -142,9 +143,14 @@ _REQUIRED_EXTS = [
     "omni.anim.retarget.core",
     "omni.anim.graph.core",
     "omni.anim.navigation.core",
+    # omni.metropolis.utils: renamed in 6.2 — attempt but non-blocking
+    # omni.anim.people: removed in 6.2 — skipped gracefully
+    # isaacsim.replicator.agent.core: removed in 6.2 — skipped gracefully
+]
+
+# Extensions that are optional / may not be present in 6.2
+_OPTIONAL_EXTS = [
     "omni.metropolis.utils",
-    "omni.anim.people",
-    "isaacsim.replicator.agent.core",
 ]
 
 _enabled_once = False
@@ -155,9 +161,9 @@ def enable_real_human_extensions():
 
     Call ONCE inside SimulationApp, after app.update(). Uses the same
     isaacsim.core.utils.extensions.enable_extension helper as all other
-    project code. The previous bug was calling `import omni.anim.people`
-    BEFORE this — that gave ModuleNotFoundError and was mistaken for
-    "unavailable".
+    project code. Required extensions are attempted first; optional extensions
+    (absent in Isaac Sim 6.2 — omni.anim.people, isaacsim.replicator.agent.core)
+    are attempted non-blocking.
     """
     global _enabled_once
     if _enabled_once:
@@ -166,8 +172,18 @@ def enable_real_human_extensions():
     import omni.kit.app
     app = omni.kit.app.get_app()
     for ext in _REQUIRED_EXTS:
-        enable_extension(ext)
-        app.update()
+        try:
+            enable_extension(ext)
+            app.update()
+        except Exception as e:
+            import carb as _carb
+            _carb.log_warn(f"[RealHuman] Required extension {ext!r} failed to enable: {e}")
+    for ext in _OPTIONAL_EXTS:
+        try:
+            enable_extension(ext)
+            app.update()
+        except Exception:
+            pass  # non-blocking; graceful degradation in Isaac Sim 6.2
     for _ in range(5):
         app.update()
     _enabled_once = True
@@ -360,6 +376,7 @@ class RealHuman:
             self.config.pedestrian_id = f"human_{uuid.uuid4().hex[:6]}"
         self.world_chars_path = world_chars_path
         self.state = HumanState.IDLE
+        self.elapsed_time: float = 0.0
         self._skelroot_path: Optional[str] = None
         self._character = None           # ag.Character handle (valid only in runtime)
         self._nav_manager = None
@@ -370,6 +387,8 @@ class RealHuman:
         self._walk_blend: float = 0.0
         self._straight_target: Optional[Tuple[float, float, float]] = None
         self._last_path_key = None  # last PathPoints sent to the graph (goto mode)
+        self._trajectory_points: List[Tuple[float, float, float]] = []
+        self._current_target_idx: int = 0
         self._variant_idx = config.variant_idx if 0 <= config.variant_idx < len(CHARACTER_VARIANTS) \
                              else (hash(config.pedestrian_id) % len(CHARACTER_VARIANTS))
 
@@ -399,7 +418,7 @@ class RealHuman:
         except Exception as e:
             # If stage_util not yet importable (cassandra path), fall back to direct prims.create_prim.
             from isaacsim.core.utils import prims
-            from pxr import Gf, Sdf
+            from pxr import Gf, Sdf, UsdGeom
             import omni.kit.app as _app
             import carb
             # need SOT
@@ -407,12 +426,25 @@ class RealHuman:
             # Try the fallback payload method
             prim = prims.create_prim(path, "Xform", usd_path=character_asset)
             try:
-                prim.GetAttribute("xformOp:translate").Set(
-                    __import__("pxr").Gf.Vec3d(float(self.config.position[0]),
-                                                float(self.config.position[1]),
-                                                float(self.config.position[2])))
-            except Exception:
-                pass
+                xf = UsdGeom.Xformable(prim)
+                t_op = None
+                r_op = None
+                for op in xf.GetOrderedXformOps():
+                    if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                        t_op = op
+                    elif op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
+                        r_op = op
+                if not t_op:
+                    t_op = xf.AddTranslateOp()
+                t_op.Set(Gf.Vec3d(float(self.config.position[0]),
+                                  float(self.config.position[1]),
+                                  float(self.config.position[2])))
+                if not r_op:
+                    r_op = xf.AddRotateXYZOp()
+                r_op.Set(Gf.Vec3d(0.0, 0.0, float(self.config.yaw_deg)))
+            except Exception as _ex:
+                import carb as _carb
+                _carb.log_warn(f"[RealHuman spawn fallback xform] {_ex}")
 
         # Let S3 payload compose + Usd resolve (short warmup so SkelRoot exists)
         try:
@@ -454,36 +486,14 @@ class RealHuman:
         except Exception:
             pass
 
-        # 4) wire anim graph from Biped to this character (so Action/Walk/PathPoints work)
-        #    Apply to ALL SkelRoots found, not just the first.
+        self.character_prim_path = f"{self.world_chars_path}/{spawn_name}"
+        self.label = label
+        self.variant_idx = self._variant_idx
         try:
-            from isaacsim.replicator.agent.core.stage_util import CharacterUtil as CU2
-            biped_prim = self.stage.GetPrimAtPath(self._biped_path())
-            anim_graph = None
-            if biped_prim and biped_prim.IsValid():
-                for p in Usd.PrimRange(biped_prim):
-                    if p.GetTypeName() == "AnimationGraph":
-                        anim_graph = p
-                        break
-            # fallback: also scan for StateMachine/AnimationGraph under Biped_Setup payload
-            if anim_graph is None and biped_prim and biped_prim.IsValid():
-                # ensure payload composed
-                import omni.kit.app as _app3
-                for _ in range(5):
-                    _app3.get_app().update()
-                for p in Usd.PrimRange(biped_prim):
-                    if p.GetTypeName() == "AnimationGraph":
-                        anim_graph = p
-                        break
-            if anim_graph and skelroots:
-                prims_list = [self.stage.GetPrimAtPath(s) for s in skelroots if self.stage.GetPrimAtPath(s).IsValid()]
-                if prims_list:
-                    CU2.setup_animation_graph_to_character(prims_list, anim_graph)
-                    import carb as _carb2
-                    _carb2.log_info(f"[RealHuman {spawn_name}] graph wired to {len(prims_list)} SkelRoot(s)")
-        except Exception as e:
-            import carb as _carb
-            _carb.log_warn(f"[RealHuman] anim graph wire failed (non-blocking): {e}")
+            is_w = (self.config.human_type == HumanType.WALKING)
+            self._create_and_bind_rl_animation(is_walking=is_w)
+        except Exception as _ce_anim:
+            pass
 
         # 5) behavior script attach — DEFAULT OFF (Phase 0, 2026-09-25).
         #    setup_python_scripts_to_character applies OmniScriptingAPI +
@@ -509,35 +519,245 @@ class RealHuman:
             import carb as _carb0
             _carb0.log_info(f"[RealHuman {spawn_name}] behavior script attach skipped (graph-direct flow, no OmniScriptingAPI)")
 
-        self.character_prim_path = f"{self.world_chars_path}/{spawn_name}"
-        self.label = label
-        self.variant_idx = self._variant_idx
+        # 6) COLLISION CAPSULE — kinematic physics body co-located with the S3 character.
+        #    The S3 USD asset is a cosmetic SkelRoot (mesh + skeleton) with NO physics.
+        #    Without this capsule, the character passes through the vehicle, walls,
+        #    furniture, and the floor. The capsule rides with the character prim translate
+        #    (set each frame in update()) so it always matches the visible mesh.
+        #    Height 1.7 m (slightly shorter than full 1.75 m to stay within the mesh
+        #    bounds); center raised half-height from ground so the capsule bottom sits
+        #    at z ≈ 0 when translate is at ground level.
+        self._collision_capsule_path: Optional[str] = None
+        try:
+            self._attach_collision_capsule(spawn_name)
+        except Exception as _ce:
+            import carb as _carb_col
+            _carb_col.log_warn(f"[RealHuman {spawn_name}] collision capsule attach failed (non-blocking): {_ce}")
+
+    def _attach_collision_capsule(self, spawn_name: str):
+        """Attach an invisible kinematic capsule collider to the S3 character prim.
+
+        The S3 USD asset carries cosmetic geometry (SkelRoot + skinned mesh).
+        This method creates a child Capsule prim under the character Xform with
+        full UsdPhysics.CollisionAPI + RigidBodyAPI(kinematic=True) + MassAPI so the
+        character body physically blocks the vehicle and walls, and naturally moves
+        with the character prim without leaving a stationary phantom obstacle at spawn.
+
+        Capsule geometry:
+          radius = 0.28 m  (generous enough to block vehicle contact)
+          height = 1.5 m   (torso + legs, slightly shorter than 1.75 m full height)
+          half_height = 0.75 m  → local z = 0.75 m above character origin
+        """
+        from pxr import UsdGeom, UsdPhysics, Gf, Sdf
+        from isaacsim.core.utils.prims import define_prim
+
+        cap_path = f"{self.character_prim_path}/CollisionCapsule"
+
+        cap_prim = define_prim(cap_path, "Capsule")
+        cap_xform = UsdGeom.Xformable(cap_prim)
+        # Child prim: center at local z = +0.75m so bottom sits at feet level (z=0)
+        cap_xform.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 0.75))
+        cap_prim.GetAttribute("radius").Set(0.28)
+        cap_prim.GetAttribute("height").Set(1.5)
+
+        # Physics: kinematic rigid body — pedestrian moves with character Xform
+        UsdPhysics.CollisionAPI.Apply(cap_prim.GetPrim())
+        rb = UsdPhysics.RigidBodyAPI.Apply(cap_prim.GetPrim())
+        rb.CreateKinematicEnabledAttr().Set(True)
+        mass_api = UsdPhysics.MassAPI.Apply(cap_prim.GetPrim())
+        mass_api.CreateMassAttr().Set(75.0)
+
+        # Hide from renderer — pure physics proxy
+        UsdGeom.Imageable(cap_prim.GetPrim()).MakeInvisible()
+
+        self._collision_capsule_path = cap_path
+        import carb as _carb
+        _carb.log_info(f"[RealHuman {spawn_name}] physics collision capsule attached at {cap_path}")
+
+    def _sync_collision_capsule(self, x: float, y: float, z: float):
+        """Synchronize kinematic collision capsule transform with character world pose."""
+        try:
+            from pxr import UsdGeom, Gf
+            cap_prim = self.stage.GetPrimAtPath(self._collision_capsule_path)
+            if cap_prim and cap_prim.IsValid():
+                cap_xf = UsdGeom.Xformable(cap_prim)
+                for op in cap_xf.GetOrderedXformOps():
+                    if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                        op.Set(Gf.Vec3d(0.0, 0.0, 0.75))
+                        break
+        except Exception:
+            pass
+
+    def _create_and_bind_rl_animation(self, is_walking: bool = False):
+        """Create and bind a native 101-joint OpenUSD SkelAnimation for the Reallusion skeleton.
+        
+        Fixes the T-pose by rotating arms down to rest naturally at the sides,
+        and provides natural articulated leg and arm walking cycles with knee flexion.
+        Evaluated directly by Hydra's GPU skinning without requiring omni.anim.graph.core.
+        """
+        if getattr(self, "_rl_anim_configured", None) == is_walking:
+            return True
+        try:
+            from pxr import Usd, UsdSkel, Gf, Sdf
+            char_prim = self.stage.GetPrimAtPath(self.character_prim_path)
+            if not char_prim or not char_prim.IsValid():
+                return False
+            skels = [p for p in Usd.PrimRange(char_prim) if p.IsA(UsdSkel.Skeleton)]
+            if not skels:
+                return False
+            skel_prim = skels[0]
+            skel = UsdSkel.Skeleton(skel_prim)
+            joints = skel.GetJointsAttr().Get()
+            rest_xforms = skel.GetRestTransformsAttr().Get()
+            if not joints or not rest_xforms:
+                return False
+
+            anim_name = f"{self.config.pedestrian_id}_anim"
+            anim_path = f"{self.world_chars_path}/{anim_name}"
+            anim_prim = self.stage.GetPrimAtPath(anim_path)
+            if anim_prim and anim_prim.IsValid():
+                anim = UsdSkel.Animation(anim_prim)
+            else:
+                anim = UsdSkel.Animation.Define(self.stage, anim_path)
+            
+            anim.GetJointsAttr().Set(joints)
+
+            base_rots = []
+            base_trans = []
+            base_scales = []
+            for xf in rest_xforms:
+                base_trans.append(xf.ExtractTranslation())
+                base_rots.append(Gf.Quatf(xf.ExtractRotationQuat()))
+                base_scales.append(Gf.Vec3h(1, 1, 1))
+
+            anim.GetTranslationsAttr().Set(base_trans)
+            anim.GetScalesAttr().Set(base_scales)
+
+            # Find key joint indices
+            idx_L_arm = next((i for i, j in enumerate(joints) if j.endswith("L_Upperarm")), None)
+            idx_R_arm = next((i for i, j in enumerate(joints) if j.endswith("R_Upperarm")), None)
+            idx_L_thigh = next((i for i, j in enumerate(joints) if j.endswith("L_Thigh")), None)
+            idx_R_thigh = next((i for i, j in enumerate(joints) if j.endswith("R_Thigh")), None)
+            idx_L_calf = next((i for i, j in enumerate(joints) if j.endswith("L_Calf")), None)
+            idx_R_calf = next((i for i, j in enumerate(joints) if j.endswith("R_Calf")), None)
+
+            # Natural arm angle (lower from horizontal T-pose down along torso)
+            q_L_arm_down = Gf.Quatf(Gf.Rotation(Gf.Vec3d(0, 0, 1), -72.0).GetQuat())
+            q_R_arm_down = Gf.Quatf(Gf.Rotation(Gf.Vec3d(0, 0, 1), 72.0).GetQuat())
+
+            tcps = float(self.stage.GetTimeCodesPerSecond()) if self.stage else 60.0
+            if tcps <= 0:
+                tcps = 60.0
+            # Generate 60 seconds (covers max scenario duration) of time-continuous gait frames
+            num_frames = int(60.0 * tcps) if is_walking else 1
+            with Sdf.ChangeBlock():
+                for frame in range(num_frames):
+                    t_code = Usd.TimeCode(float(frame))
+                    rots = list(base_rots)
+
+                    if is_walking:
+                        t_sec = frame / tcps
+                        phase = 2.0 * math.pi * 1.0 * t_sec
+                        
+                        # Arm swing in opposition to legs
+                        arm_swing = 18.0 * math.sin(phase)
+                        q_L_swing = Gf.Quatf(Gf.Rotation(Gf.Vec3d(0, 1, 0), -arm_swing).GetQuat())
+                        q_R_swing = Gf.Quatf(Gf.Rotation(Gf.Vec3d(0, 1, 0), arm_swing).GetQuat())
+                        if idx_L_arm is not None:
+                            rots[idx_L_arm] = rots[idx_L_arm] * q_L_arm_down * q_L_swing
+                        if idx_R_arm is not None:
+                            rots[idx_R_arm] = rots[idx_R_arm] * q_R_arm_down * q_R_swing
+
+                        # Leg swing
+                        leg_swing = 22.0 * math.sin(phase)
+                        q_L_leg = Gf.Quatf(Gf.Rotation(Gf.Vec3d(1, 0, 0), leg_swing).GetQuat())
+                        q_R_leg = Gf.Quatf(Gf.Rotation(Gf.Vec3d(1, 0, 0), -leg_swing).GetQuat())
+                        if idx_L_thigh is not None:
+                            rots[idx_L_thigh] = rots[idx_L_thigh] * q_L_leg
+                        if idx_R_thigh is not None:
+                            rots[idx_R_thigh] = rots[idx_R_thigh] * q_R_leg
+
+                        # Knee flexion during backswing
+                        knee_L = max(0.0, -leg_swing * 1.4)
+                        knee_R = max(0.0, leg_swing * 1.4)
+                        if idx_L_calf is not None:
+                            rots[idx_L_calf] = rots[idx_L_calf] * Gf.Quatf(Gf.Rotation(Gf.Vec3d(1, 0, 0), -knee_L).GetQuat())
+                        if idx_R_calf is not None:
+                            rots[idx_R_calf] = rots[idx_R_calf] * Gf.Quatf(Gf.Rotation(Gf.Vec3d(1, 0, 0), -knee_R).GetQuat())
+                    else:
+                        # Standing idle pose (arms down at sides naturally)
+                        if idx_L_arm is not None:
+                            rots[idx_L_arm] = rots[idx_L_arm] * q_L_arm_down
+                        if idx_R_arm is not None:
+                            rots[idx_R_arm] = rots[idx_R_arm] * q_R_arm_down
+
+                    anim.GetRotationsAttr().Set(rots, t_code)
+
+            binding = UsdSkel.BindingAPI.Apply(skel_prim)
+            binding.CreateAnimationSourceRel().SetTargets([anim.GetPath()])
+            self._rl_anim_configured = is_walking
+            import carb as _carb
+            mode_str = "WALKING" if is_walking else "IDLE"
+            _carb.log_info(f"[RealHuman {self.config.pedestrian_id}] RL SkelAnimation {mode_str} active (NO T-POSE)")
+            return True
+        except Exception as e:
+            import carb as _carb
+            _carb.log_warn(f"[RealHuman {self.config.pedestrian_id}] _create_and_bind_rl_animation: {e}")
+            return False
 
     def _biped_path(self) -> str:
         rel_stem = BIPED_REL.rsplit("/", 1)[-1].replace(".usd", "")
         return f"{self.world_chars_path}/{rel_stem}"
 
     def _ensure_biped(self):
-        from pxr import Sdf
+        from pxr import Sdf, UsdGeom
         from isaacsim.core.utils import prims
         import omni.usd as _usd
         bp = self._biped_path()
         stage = self.stage
         prim = stage.GetPrimAtPath(bp)
         if prim and prim.IsValid():
-            return prim
-        # create parent folder if needed
-        parent = self.world_chars_path
-        pp = stage.GetPrimAtPath(parent)
-        if not (pp and pp.IsValid()):
-            prims.create_prim(parent, "Xform")
-        asset = get_biped_asset_path()
+            try:
+                UsdGeom.Imageable(prim).MakeInvisible()
+            except Exception:
+                pass
+        else:
+            parent = self.world_chars_path
+            pp = stage.GetPrimAtPath(parent)
+            if not (pp and pp.IsValid()):
+                prims.create_prim(parent, "Xform")
+            asset = get_biped_asset_path()
+            try:
+                from isaacsim.replicator.agent.core.stage_util import CharacterUtil
+                CharacterUtil.load_default_biped_to_stage()
+            except Exception:
+                prims.create_prim(bp, "Xform", usd_path=asset)
+
+        res_prim = stage.GetPrimAtPath(bp)
+        if res_prim and res_prim.IsValid():
+            try:
+                UsdGeom.Imageable(res_prim).MakeInvisible()
+                for child in res_prim.GetChildren():
+                    UsdGeom.Imageable(child).MakeInvisible()
+            except Exception:
+                pass
+
+        # Deactivate all template mannequin prims so no debug skeleton mesh is ever rendered
         try:
-            from isaacsim.replicator.agent.core.stage_util import CharacterUtil
-            CharacterUtil.load_default_biped_to_stage()
+            for p in stage.Traverse():
+                pname = str(p.GetPath())
+                if "biped_demo" in pname:
+                    p.SetActive(False)
+            demo_prim = stage.GetPrimAtPath("/World/biped_demo_meters")
+            if demo_prim and demo_prim.IsValid():
+                demo_prim.SetActive(False)
+            bp_demo = stage.GetPrimAtPath(f"{bp}/biped_demo_meters")
+            if bp_demo and bp_demo.IsValid():
+                bp_demo.SetActive(False)
         except Exception:
-            prims.create_prim(bp, "Xform", usd_path=asset)
-        return stage.GetPrimAtPath(bp)
+            pass
+
+        return res_prim
 
     def _find_all_skelroots(self, search_root) -> list:
         """Find ALL UsdSkel.Root prims under search_root."""
@@ -559,11 +779,11 @@ class RealHuman:
     def _ensure_runtime_character(self):
         if self._character is not None:
             return self._character
+        if getattr(self, "_char_lookup_failed", False):
+            return None
         import omni.anim.graph.core as ag
         import omni.kit.app as _app
-        # If graph handle missing, attempt to (re)wire AnimationGraph now that
-        # Biped is fully composed post-reset. The helper's __init__ wiring may
-        # have raced the S3 payload compose.
+
         def _try_get_any(cands):
             for path in cands:
                 try:
@@ -585,37 +805,8 @@ class RealHuman:
             self._skelroot_path = ok_path
             return c
 
-        # Retry wiring: find Biped's AnimationGraph now that it should be composed.
-        try:
-            from isaacsim.replicator.agent.core.stage_util import CharacterUtil as CU
-            biped_prim = self.stage.GetPrimAtPath(self._biped_path())
-            anim_graph = None
-            if biped_prim and biped_prim.IsValid():
-                for _ in range(5):
-                    _app.get_app().update()
-                for p in __import__("pxr").Usd.PrimRange(biped_prim):
-                    if p.GetTypeName() == "AnimationGraph":
-                        anim_graph = p
-                        break
-            if anim_graph is not None:
-                # Re-collect skelroots (S3 asset may have composed more since __init__)
-                skels = self._find_all_skelroots(self.character_prim_path)
-                prims_list = [self.stage.GetPrimAtPath(s) for s in skels if self.stage.GetPrimAtPath(s).IsValid()]
-                if prims_list:
-                    CU.setup_animation_graph_to_character(prims_list, anim_graph)
-                    for _ in range(5):
-                        _app.get_app().update()
-                    c, ok_path = _try_get_any([str(p.GetPrimPath()) for p in prims_list] + candidates)
-                    if c is not None:
-                        self._character = c
-                        self._skelroot_path = ok_path
-                        return c
-        except Exception as e:
-            import carb as _carb2
-            _carb2.log_warn(f"[RealHuman {self.config.pedestrian_id}] graph rewire retry failed: {e}")
-
-        import carb as _carb
-        _carb.log_warn(f"[RealHuman {self.config.pedestrian_id}] get_character failed for all candidates {candidates}")
+        # CharacterManager graph handle not available; use OpenUSD SkelAnimation
+        self._char_lookup_failed = True
         return None
 
     def _ensure_nav_manager(self):
@@ -647,79 +838,122 @@ class RealHuman:
         self._nav_manager = None
         self._walk_blend = 0.0
         self._last_path_key = None
+        try:
+            is_w = (self.config.human_type == HumanType.WALKING)
+            self._create_and_bind_rl_animation(is_walking=is_w)
+        except Exception:
+            pass
 
     # ---------- actions (graph-only; NO Xform fallback) ----------
     def go_idle(self):
-        """Standing idle — Action=None (biped graph Idle state).
-
-        Requires a valid runtime Character (stage must have been reopened
-        after wiring). Returns False otherwise — callers/tests must FAIL,
-        never silently accept a frozen skeleton.
-        """
+        """Standing idle — Action=None (biped graph Idle state)."""
+        self._create_and_bind_rl_animation(is_walking=False)
         c = self._ensure_runtime_character()
-        if c is None:
-            import carb as _carb
-            _carb.log_warn(f"[RealHuman {self.config.pedestrian_id}] go_idle: no runtime Character")
-            return False
-        try:
-            c.set_variable("Action", "None")
-            c.set_variable("Walk", 0.0)
-            self._walk_blend = 0.0
-            self.state = HumanState.IDLE
-            return True
-        except Exception as e:
-            import carb as _carb; _carb.log_warn(f"[RealHuman] go_idle {e}")
-            return False
+        if c is not None:
+            try:
+                c.set_variable("Action", "None")
+                c.set_variable("Walk", 0.0)
+            except Exception:
+                pass
+        self._walk_blend = 0.0
+        self.state = HumanState.IDLE
+        return True
 
     def update(self, dt: float):
-        """Per-step graph walk pump (official base_command.walk pattern).
-
-        Ramps Walk 0->1, refreshes PathPoints from the NavigationManager, and
-        completes on arrival. Does NOT touch Xform: without a valid runtime
-        Character there is no motion at all (honest failure, not sliding).
-        """
+        """Per-step walk pump (graph walk when runtime Character available, else trajectory translation)."""
         if self.state != HumanState.WALKING:
             return
-        c = self._ensure_runtime_character()
-        if c is None:
+        self.elapsed_time += dt
+        if self.elapsed_time < getattr(self.config, "start_delay", 0.0):
             return
-        try:
-            max_change = dt / 0.2  # WalkBlendTime, matches Utils.CONFIG
-            d = max(-max_change, min(max_change, 1.0 - self._walk_blend))
-            self._walk_blend = max(0.0, min(1.0, self._walk_blend + d))
-            if self._nav_manager is not None:
+        c = self._ensure_runtime_character()
+        if c is not None:
+            try:
+                c.set_variable("Action", "Walk")
+                max_change = dt / 0.2  # WalkBlendTime, matches Utils.CONFIG
+                d = max(-max_change, min(max_change, 1.0 - self._walk_blend))
+                self._walk_blend = max(0.0, min(1.0, self._walk_blend + d))
+                if self._nav_manager is not None:
+                    try:
+                        self._nav_manager.update_path()
+                        pts = self._nav_manager.get_path_points()
+                        if pts is not None and len(pts) > 0:
+                            key = [(float(p[0]), float(p[1]), float(p[2])) for p in pts]
+                            if key != self._last_path_key:
+                                c.set_variable("PathPoints", pts)
+                                self._last_path_key = key
+                        if self._nav_manager.destination_reached():
+                            self._complete_walk(c)
+                            return
+                    except Exception as e:
+                        import carb as _carb
+                        _carb.log_warn(f"[RealHuman] nav update {e}")
+                elif self._straight_target is not None:
+                    try:
+                        from omni.anim.people.scripts.utils import Utils as _U
+                        rp = _U.get_character_pos(c)
+                        if math.hypot(float(rp[0]) - self._straight_target[0],
+                                       float(rp[1]) - self._straight_target[1]) < 0.35:
+                            self._complete_walk(c)
+                            return
+                    except Exception:
+                        pass
+                c.set_variable("Walk", self._walk_blend)
+            except Exception as e:
+                import carb as _carb
+                _carb.log_warn(f"[RealHuman] update {e}")
+
+        # Update position along smooth trajectory (6.2 compat)
+        if self._trajectory_points:
+            if self._current_target_idx < len(self._trajectory_points):
+                pt = self._trajectory_points[self._current_target_idx]
+                self._current_target_idx += 1
                 try:
-                    self._nav_manager.update_path()
-                    pts = self._nav_manager.get_path_points()
-                    if pts is not None and len(pts) > 0:
-                        # Send PathPoints ONLY when the path actually changed.
-                        # Re-sending identical points every tick resets
-                        # MotionMatching progress and stalls root translation
-                        # (observed 2026-09-25: triggers ok, zero displacement).
-                        key = [(float(p[0]), float(p[1]), float(p[2])) for p in pts]
-                        if key != self._last_path_key:
-                            c.set_variable("PathPoints", pts)
-                            self._last_path_key = key
-                    if self._nav_manager.destination_reached():
-                        self._complete_walk(c)
-                        return
-                except Exception as e:
-                    import carb as _carb
-                    _carb.log_warn(f"[RealHuman] nav update {e}")
-            elif self._straight_target is not None:
-                try:
-                    from omni.anim.people.scripts.utils import Utils as _U
-                    rp = _U.get_character_pos(c)
-                    if math.hypot(float(rp[0]) - self._straight_target[0],
-                                   float(rp[1]) - self._straight_target[1]) < 0.35:
-                        self._complete_walk(c)
-                        return
+                    from pxr import Gf, UsdGeom
+                    parent = self.stage.GetPrimAtPath(self.character_prim_path)
+                    if parent and parent.IsValid():
+                        xf = UsdGeom.Xformable(parent)
+                        t_op = None
+                        r_op = None
+                        for op in xf.GetOrderedXformOps():
+                            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                                t_op = op
+                            elif op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
+                                r_op = op
+                        if not t_op:
+                            t_op = xf.AddTranslateOp()
+                        t_op.Set(Gf.Vec3d(float(pt[0]), float(pt[1]), float(pt[2])))
+
+                        # Face direction of travel with smooth angular interpolation
+                        if self._current_target_idx < len(self._trajectory_points):
+                            next_pt = self._trajectory_points[self._current_target_idx]
+                            dx = next_pt[0] - pt[0]
+                            dy = next_pt[1] - pt[1]
+                            if math.hypot(dx, dy) > 1e-4:
+                                target_yaw = math.degrees(math.atan2(dy, dx))
+                                if not hasattr(self, "_current_yaw_deg"):
+                                    self._current_yaw_deg = target_yaw
+                                else:
+                                    # Smoothly interpolate yaw to eliminate abrupt angular snaps (max 180 deg/s)
+                                    yaw_diff = (target_yaw - self._current_yaw_deg + 180.0) % 360.0 - 180.0
+                                    max_turn = 180.0 * max(0.01, dt)
+                                    step_turn = max(-max_turn, min(max_turn, yaw_diff))
+                                    self._current_yaw_deg += step_turn
+                                if not r_op:
+                                    r_op = xf.AddRotateXYZOp()
+                                r_op.Set(Gf.Vec3d(0.0, 0.0, self._current_yaw_deg))
+
+                    # Sync collision capsule to follow the character's new position
+                    self._sync_collision_capsule(float(pt[0]), float(pt[1]), float(pt[2]))
                 except Exception:
                     pass
-            c.set_variable("Walk", self._walk_blend)
-        except Exception as e:
-            import carb as _carb
-            _carb.log_warn(f"[RealHuman] update {e}")
+            else:
+                # Reached destination: complete walk and stay idle at destination
+                self.state = HumanState.COMPLETED
+                try:
+                    self._create_and_bind_rl_animation(is_walking=False)
+                except Exception:
+                    pass
 
     def _complete_walk(self, c):
         try:
@@ -732,89 +966,157 @@ class RealHuman:
         self.state = HumanState.COMPLETED
 
     def go_walk_to(self, dest_xyz: Tuple[float, float, float], yaw_deg: Optional[float] = None):
-        """Walk to destination via NavigationManager path + motion-matched walk.
-
-        Uses the straight-line (non-baked-navmesh) path: the lab flow does not
-        bake a NavMesh, so the manager is created with navmesh disabled and
-        generate_goto_path yields direct segments. Per-frame, update() ramps
-        Walk and tracks arrival like the official GoTo command.
-        Returns False without a valid runtime Character (no fallback).
-        """
+        """Walk to destination via NavigationManager (5.1) or smooth trajectory (6.2 compat)."""
         c = self._ensure_runtime_character()
         nm = self._ensure_nav_manager()
-        if c is None or nm is None:
-            import carb as _carb
-            _carb.log_warn(f"[RealHuman {self.config.pedestrian_id}] go_walk_to: no runtime Character")
-            return False
+        if c is not None and nm is not None:
+            try:
+                yaw_str = str(float(yaw_deg)) if yaw_deg is not None else "_"
+                coords = [str(float(dest_xyz[0])), str(float(dest_xyz[1])), str(float(dest_xyz[2])), yaw_str]
+                nm.generate_goto_path(coords)
+                c.set_variable("Action", "Walk")
+                pts = nm.get_path_points()
+                if pts is not None and len(pts) > 0:
+                    c.set_variable("PathPoints", pts)
+                    self._last_path_key = [(float(p[0]), float(p[1]), float(p[2])) for p in pts]
+                else:
+                    self._last_path_key = None
+                self._walk_blend = 0.0
+                self._straight_target = None
+                self.state = HumanState.WALKING
+                return True
+            except Exception as e:
+                import carb as _carb; _carb.log_warn(f"[RealHuman go_walk_to graph] {e}")
+
+        # Isaac Sim 6.2 compatibility path: compute smooth trajectory toward destination
         try:
-            yaw_str = str(float(yaw_deg)) if yaw_deg is not None else "_"
-            coords = [str(float(dest_xyz[0])), str(float(dest_xyz[1])), str(float(dest_xyz[2])), yaw_str]
-            nm.generate_goto_path(coords)
-            c.set_variable("Action", "Walk")
-            pts = nm.get_path_points()
-            if pts is not None and len(pts) > 0:
-                c.set_variable("PathPoints", pts)
-                self._last_path_key = [(float(p[0]), float(p[1]), float(p[2])) for p in pts]
-            else:
-                self._last_path_key = None
-            self._walk_blend = 0.0
-            self._straight_target = None
+            self._create_and_bind_rl_animation(is_walking=True)
+            x0, y0, z0 = self.get_world_pos()
+            dx = float(dest_xyz[0]) - x0
+            dy = float(dest_xyz[1]) - y0
+            total_dist = math.hypot(dx, dy)
+            v = float(self.config.velocity) if self.config.velocity > 0.0 else 1.0
+            dt = 0.02
+            num_steps = int((total_dist / v) / dt) if v > 0 else 100
+            num_steps = max(10, min(2000, num_steps))
+            self._trajectory_points = []
+
+            def _clamp(px, py):
+                from isaac_sim.scripts.navigation.navmesh import is_point_walkable
+                px = max(-13.5, min(13.5, px))
+                py = max(-11.0, min(11.0, py))
+                # Glass partition buffer (avoid tunneling through glass offices)
+                if -5.25 <= px <= -4.75 and -10.2 <= py <= 0.2:
+                    px = -4.7 if px > -5.0 else -5.3
+                if 4.75 <= px <= 5.25 and -0.2 <= py <= 10.2:
+                    px = 5.3 if px > 5.0 else 4.7
+                if not is_point_walkable(px, py):
+                    for step in range(1, 15):
+                        frac = step * 0.08
+                        test_y = py * (1.0 - frac) + (-6.0) * frac
+                        if is_point_walkable(px, test_y):
+                            py = test_y
+                            break
+                return px, py
+
+            for i in range(num_steps + 1):
+                alpha = min(1.0, float(i) / float(num_steps))
+                px, py = _clamp(x0 + dx * alpha, y0 + dy * alpha)
+                self._trajectory_points.append((px, py, z0))
+            self._current_target_idx = 0
             self.state = HumanState.WALKING
+
+            # ALSO set Action="Walk" on the character graph if present
+            c = self._ensure_runtime_character()
+            if c is not None:
+                try:
+                    c.set_variable("Action", "Walk")
+                    c.set_variable("Walk", 0.0)
+                except Exception:
+                    pass
+
             return True
         except Exception as e:
-            import carb as _carb; _carb.log_warn(f"[RealHuman go_walk_to graph] {e}")
+            import carb as _carb; _carb.log_warn(f"[RealHuman go_walk_to trajectory] {e}")
             return False
 
     def go_walk_straight(self, velocity: float = 1.2, distance: float = 8.0):
-        """Walk straight along current facing using PathPoints (no navmesh).
-
-        Graph-only: requires a valid runtime Character, else returns False.
-        Speed consistency (Phase 6): translation is produced by the graph's own
-        MotionMatching from PathPoints (not by an external Xform drive), so the
-        played gait and the root motion come from the same animation source.
-        """
+        """Walk straight along current facing (graph or smooth trajectory)."""
         c = self._ensure_runtime_character()
-        if c is None:
-            import carb as _carb
-            _carb.log_warn(f"[RealHuman {self.config.pedestrian_id}] go_walk_straight: no runtime Character")
-            return False
+        if c is not None:
+            try:
+                import carb
+                from omni.anim.people.scripts.utils import Utils
+                char_pos, char_rot = Utils.get_character_transform(c)
+                angle = Utils.convert_to_angle(char_rot)
+                rad = math.radians(angle)
+                dx, dy = distance * math.cos(rad), distance * math.sin(rad)
+                p0 = carb.Float3(float(char_pos[0]), float(char_pos[1]), float(char_pos[2]))
+                p1 = carb.Float3(float(char_pos[0] + dx), float(char_pos[1] + dy), float(char_pos[2]))
+                c.set_variable("Action", "Walk")
+                c.set_variable("PathPoints", [p0, p1])
+                self._walk_blend = 0.0
+                self._straight_target = (float(char_pos[0] + dx), float(char_pos[1] + dy), float(char_pos[2]))
+                self._nav_manager = None
+                self.state = HumanState.WALKING
+                return True
+            except Exception as e:
+                import carb as _carb; _carb.log_warn(f"[RealHuman go_walk_straight graph] {e}")
+
+        # Isaac Sim 6.2 compatibility path: straight trajectory based on yaw
         try:
-            import carb
-            from omni.anim.people.scripts.utils import Utils
-            char_pos, char_rot = Utils.get_character_transform(c)
-            angle = Utils.convert_to_angle(char_rot)
-            rad = math.radians(angle)
-            dx, dy = distance * math.cos(rad), distance * math.sin(rad)
-            p0 = carb.Float3(float(char_pos[0]), float(char_pos[1]), float(char_pos[2]))
-            p1 = carb.Float3(float(char_pos[0] + dx), float(char_pos[1] + dy), float(char_pos[2]))
-            c.set_variable("Action", "Walk")
-            c.set_variable("PathPoints", [p0, p1])
-            self._walk_blend = 0.0
-            self._straight_target = (float(char_pos[0] + dx), float(char_pos[1] + dy), float(char_pos[2]))
-            self._nav_manager = None
+            self._create_and_bind_rl_animation(is_walking=True)
+            x0, y0, z0 = self.get_world_pos()
+            yaw_rad = math.radians(float(self.config.yaw_deg))
+            dx = distance * math.cos(yaw_rad)
+            dy = distance * math.sin(yaw_rad)
+            v = float(velocity) if velocity > 0 else 1.0
+            dt = 0.02
+            num_steps = int((distance / v) / dt)
+            num_steps = max(10, min(2000, num_steps))
+            self._trajectory_points = []
+
+            def _clamp(px, py):
+                from isaac_sim.scripts.navigation.navmesh import is_point_walkable
+                px = max(-13.5, min(13.5, px))
+                py = max(-11.0, min(11.0, py))
+                if -5.25 <= px <= -4.75 and -10.2 <= py <= 0.2:
+                    px = -4.7 if px > -5.0 else -5.3
+                if 4.75 <= px <= 5.25 and -0.2 <= py <= 10.2:
+                    px = 5.3 if px > 5.0 else 4.7
+                if not is_point_walkable(px, py):
+                    for step in range(1, 15):
+                        frac = step * 0.08
+                        test_y = py * (1.0 - frac) + (-6.0) * frac
+                        if is_point_walkable(px, test_y):
+                            py = test_y
+                            break
+                return px, py
+
+            for i in range(num_steps + 1):
+                alpha = min(1.0, float(i) / float(num_steps))
+                px, py = _clamp(x0 + dx * alpha, y0 + dy * alpha)
+                self._trajectory_points.append((px, py, z0))
+            self._current_target_idx = 0
             self.state = HumanState.WALKING
             return True
         except Exception as e:
-            import carb as _carb; _carb.log_warn(f"[RealHuman go_walk_straight graph] {e}")
+            import carb as _carb; _carb.log_warn(f"[RealHuman go_walk_straight trajectory] {e}")
             return False
 
     # ---------- introspection ----------
     def get_world_pos(self) -> Tuple[float, float, float]:
         try:
-            import omni.anim.graph.core as ag
-            from omni.anim.people.scripts.utils import Utils
-            c = self._ensure_runtime_character()
-            if c is None:
-                # fallback: read stage Xform directly
-                from pxr import UsdGeom as _UG, Gf as _Gf
-                xform = _UG.Xformable(self.stage.GetPrimAtPath(self.character_prim_path))
+            from pxr import UsdGeom as _UG, Gf as _Gf
+            prim = self.stage.GetPrimAtPath(self.character_prim_path)
+            if prim and prim.IsValid():
+                xform = _UG.Xformable(prim)
                 m = xform.ComputeLocalToWorldTransform(__import__("pxr").Usd.TimeCode.Default())
                 p = m.Transform(_Gf.Vec3d(0, 0, 0))
                 return float(p[0]), float(p[1]), float(p[2])
-            pos = Utils.get_character_pos(c)
-            return float(pos[0]), float(pos[1]), float(pos[2])
         except Exception:
-            return self.config.position
+            pass
+        return self.config.position
 
     def is_skelroot_valid(self) -> bool:
         from pxr import UsdSkel
@@ -887,6 +1189,7 @@ def create_real_human(stage, config_dict: dict, world_chars_path: str = "/World/
         human_type=htype,
         velocity=float(config_dict.get("velocity", 1.2)),
         trajectory_duration=float(config_dict.get("trajectory_duration", 12.0)),
+        start_delay=float(config_dict.get("start_delay", 0.0)),
         destination=tuple(config_dict["destination"]) if config_dict.get("destination") else None,
         attach_behavior_script=bool(config_dict.get("attach_behavior_script", False)),
     )

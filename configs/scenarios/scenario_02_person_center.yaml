@@ -31,6 +31,7 @@ pedestrians:
   - 0.3
   - 0.2
   variant_idx: 3
+  human_tier: segmented
   animation: idle
   is_realistic: true
   wait_time: 0.0

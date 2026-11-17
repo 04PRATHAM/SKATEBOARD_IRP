@@ -1,0 +1,20 @@
+# Scenario S01: Empty Laboratory
+# Objective: Vehicle starts at (6.0, -6.0) and navigates collision-free along the global A* route to (13.5, -6.0).
+# No obstacles block the route.
+
+scenario_name: scenario_s01_empty_lab
+description: Empty laboratory corridor test. Autonomous point-to-point navigation with no obstacles.
+
+vehicle_start_pose:
+  - 6.0    # x
+  - -6.0   # y
+  - 0.35   # z
+  - 0.0    # yaw (facing +X)
+
+vehicle_destination_pose:
+  - 13.5   # x
+  - -6.0   # y
+  - 0.0    # yaw
+
+pedestrians: []
+static_obstacles: []

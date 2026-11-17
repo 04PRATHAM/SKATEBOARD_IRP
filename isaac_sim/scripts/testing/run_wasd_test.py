@@ -26,6 +26,7 @@ def main():
     sim = SimulationApp({"headless": args.headless, "renderer": "RayTracedLighting"})
 
     import numpy as np
+    # pyrefly: ignore [missing-import]
     from pxr import Usd, UsdGeom, Gf
     from isaac_sim.scripts.utils.world_setup import build_world
     from isaac_sim.scripts.testing.wasd_controller import WASDState, subscribe_wasd

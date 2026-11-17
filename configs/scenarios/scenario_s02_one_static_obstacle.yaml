@@ -1,0 +1,31 @@
+# Scenario S02: One Static Obstacle
+# Objective: One previously unknown table blocks the nominal path at (10.0, -6.0).
+# The vehicle discovers it via RGB-D, generates an Ackermann-compatible detour, and reaches (13.5, -6.0).
+
+scenario_name: scenario_s02_one_static_obstacle
+description: Autonomous navigation with one unknown static table blocking the forward route.
+
+vehicle_start_pose:
+  - 6.0
+  - -6.0
+  - 0.35
+  - 0.0
+
+vehicle_destination_pose:
+  - 13.5
+  - -6.0
+  - 0.0
+
+pedestrians: []
+
+static_obstacles:
+  - object_type: table
+    object_id: static_table_01
+    position:
+      - 10.0
+      - -6.0
+      - 0.0
+    dimensions:
+      - 1.4
+      - 0.8
+      - 0.75

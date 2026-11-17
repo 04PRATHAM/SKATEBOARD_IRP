@@ -31,12 +31,13 @@ pedestrians:
   - 0.6
   - 0.9
   variant_idx: 3
+  human_tier: segmented
   animation: walk
   is_realistic: true
   wait_time: 2.0
   destination:
   - 12.0
-  - -16.4
+  - -10.0
   - 0.0
 static_obstacles: []
 environment_region: crossing_zone

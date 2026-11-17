@@ -33,10 +33,13 @@ def main():
     simulation_app = SimulationApp({"headless": False, "renderer": "RayTracedLighting"})
 
     import numpy as np
+    # pyrefly: ignore [missing-import]
     from pxr import UsdGeom, Gf, Usd
+    # pyrefly: ignore [missing-import]
     import omni.usd
     from isaac_sim.scripts.utils.config_loader import load_config
     from isaac_sim.scripts.utils.world_setup import build_world
+    # pyrefly: ignore [missing-import]
     from isaacsim.robot.wheeled_robots.controllers.ackermann_controller import AckermannController
 
     built = build_world(dynamic=True, with_cameras=True, with_ros=False)
@@ -64,6 +67,7 @@ def main():
     ros_cb = {"steer": None, "speed": None}
     try:
         import rclpy
+        # pyrefly: ignore [missing-import]
         from ackermann_msgs.msg import AckermannDriveStamped
 
         rclpy.init()

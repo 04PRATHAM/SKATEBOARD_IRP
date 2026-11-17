@@ -20,6 +20,7 @@ import argparse
 import os
 import sys
 import time
+import yaml
 
 sys.path.insert(0, "/home/ubuntu/SKATEBOARD_IRP")
 
@@ -47,6 +48,12 @@ def check(label, cond, detail=""):
     return bool(cond)
 
 
+# Load config for target_classes + application labels
+with open(ROOT + "/configs/perception.yaml") as f:
+    cfg = yaml.safe_load(f)
+target_classes = tuple(cfg["perception"].get("target_classes", [0]))
+app_names = cfg["perception"].get("application_class_names", {}) or {}
+
 # 1. load (official weights; downloaded by ultralytics on first use if absent)
 from rgbd_perception.yolo_seg import YoloSegDetector  # noqa: E402
 import numpy as np  # noqa: E402
@@ -54,7 +61,8 @@ from PIL import Image, ImageDraw  # noqa: E402
 
 t_load0 = time.perf_counter()
 det = YoloSegDetector(model_path="yolo26n-seg.pt", device=args.device,
-                      conf=args.conf, target_classes=(0,))
+                      conf=args.conf, target_classes=target_classes,
+                      app_names=app_names)
 t_load1 = time.perf_counter()
 check("G1 model loads (yolo26n-seg.pt)", True,
       "task=%s device=%s load=%.1fs" % ("segment", det.device, t_load1 - t_load0))

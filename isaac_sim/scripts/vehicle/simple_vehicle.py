@@ -28,9 +28,13 @@ def create_simple_vehicle(world, vehicle_cfg: dict, static_mode: bool = True,
     Returns:
         Articulation object for the vehicle
     """
+    # pyrefly: ignore [missing-import]
     from pxr import Usd, UsdGeom, UsdPhysics, PhysxSchema, Gf, Sdf
+    # pyrefly: ignore [missing-import]
     import omni.usd
+    # pyrefly: ignore [missing-import]
     from isaacsim.core.prims import Articulation
+    # pyrefly: ignore [missing-import]
     from isaacsim.core.utils.prims import define_prim, get_prim_at_path
     
     stage = omni.usd.get_context().get_stage()
@@ -105,6 +109,7 @@ def create_simple_vehicle(world, vehicle_cfg: dict, static_mode: bool = True,
         physx_chassis = PhysxSchema.PhysxRigidBodyAPI.Apply(chassis_prim.GetPrim())
         physx_chassis.CreateSolverPositionIterationCountAttr().Set(16)
         physx_chassis.CreateSolverVelocityIterationCountAttr().Set(8)
+        physx_chassis.CreateEnableCcdAttr().Set(True)
     except Exception:
         pass
 
@@ -113,6 +118,12 @@ def create_simple_vehicle(world, vehicle_cfg: dict, static_mode: bool = True,
     chassis_collider = create_cube(f"{chassis_path}/CollisionBox", (0.0, 0.0, 0.0),
                                    (length, width, height))
     UsdPhysics.CollisionAPI.Apply(chassis_collider.GetPrim())
+    try:
+        physx_col = PhysxSchema.PhysxCollisionAPI.Apply(chassis_collider.GetPrim())
+        physx_col.CreateContactOffsetAttr().Set(0.04)
+        physx_col.CreateRestOffsetAttr().Set(0.0)
+    except Exception:
+        pass
     UsdGeom.Imageable(chassis_collider.GetPrim()).MakeInvisible()
     
     if static_mode:
@@ -204,7 +215,7 @@ def create_simple_vehicle(world, vehicle_cfg: dict, static_mode: bool = True,
                 # convert to degrees (~34.4 deg). Previously these were set to the
                 # raw radian value 0.6 -> PhysX clamped the steer joint to ±0.6°
                 # (±0.0105 rad), so the wheels could never actually steer.
-                steer_limit_deg = float(np.degrees(max_steering_angle))
+                steer_limit_deg = float(np.degrees(max_steering_angle * 1.25))
                 steer.CreateLowerLimitAttr().Set(-steer_limit_deg)
                 steer.CreateUpperLimitAttr().Set(steer_limit_deg)
                 steer.CreateBody0Rel().AddTarget(chassis_path)
@@ -276,7 +287,9 @@ def create_simple_vehicle(world, vehicle_cfg: dict, static_mode: bool = True,
     # 0.8 lets the rear-driven slide settle. Bound to the 4 physics wheels and
     # the lab ground plane so drive torque actually moves the vehicle.
     if not static_mode:
+        # pyrefly: ignore [missing-import]
         from isaacsim.core.api.materials import PhysicsMaterial
+        # pyrefly: ignore [missing-import]
         from pxr import UsdShade as _UsdShade
         tire_mat = PhysicsMaterial(
             f"{vehicle_path}/TirePhysicsMaterial",
@@ -344,6 +357,7 @@ def create_simple_vehicle(world, vehicle_cfg: dict, static_mode: bool = True,
     # Positioned at seat level (-0.25,0,0.75) local to Chassis, pitch 0°, facing +X.
     # Parented to Chassis so it moves 1:1 with vehicle and appears in Viewport Camera menu.
     try:
+        # pyrefly: ignore [missing-import]
         from pxr import UsdGeom
         from isaac_sim.scripts.utils.aim import aim_prim
         driver_cam_path = f"{chassis_path}/Driver_Seat_Camera"
@@ -406,4 +420,8 @@ def apply_ackermann_steering(articulation, steering_angle: float, vehicle_cfg: d
         delta_fl = np.arctan(wheelbase * tan_delta / (wheelbase - front_track / 2.0 * tan_delta))
         delta_fr = np.arctan(wheelbase * tan_delta / (wheelbase + front_track / 2.0 * tan_delta))
     
+    # Clip knuckle joint targets to physically allowed revolute limit with margin
+    limit = max_steering * 1.20
+    delta_fl = float(np.clip(delta_fl, -limit, limit))
+    delta_fr = float(np.clip(delta_fr, -limit, limit))
     return delta_fl, delta_fr

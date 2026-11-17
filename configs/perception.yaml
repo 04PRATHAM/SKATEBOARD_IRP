@@ -18,9 +18,19 @@ perception:
 
   # Classes: COCO-pretrained IDs. Runtime treats ONLY these as obstacles;
   # never assume every COCO class is physical (see obstacle_classes).
-  target_classes: [0]          # 0 = person (primary contract)
-  obstacle_classes: [0]        # classes the planner must avoid; others reported, not avoided
-  class_names_override: {}     # e.g. {0: person}; empty = use model names
+  # Full COCO map: 0=person, 13=bench, 56=chair, 57=couch, 60=dining table, etc.
+  target_classes: [0, 13, 56, 57, 60]          # person, bench, chair, couch, dining table
+  obstacle_classes: [0, 13, 56, 57, 60]        # classes the planner must avoid; others reported, not avoided
+  class_names_override: {}                     # e.g. {0: person}; empty = use model names
+  # Application-facing labels (ONE canonical rename layer — see config.py::application_label).
+  # Model weights are NEVER changed: class 60 stays COCO "dining table" internally,
+  # but every downstream output (Detection2D, Object3D, viewer, logs, JSON) says "table".
+  application_class_names:
+    0: person
+    13: bench
+    56: chair
+    57: couch
+    60: table
 
   # Depth association (mask-first, RGB-only model input — NEVER 4-channel)
   depth_method: "mask_median"  # mask_median | mask_trimmed | bbox_center
@@ -45,9 +55,9 @@ planner:
   lookahead_max: 8.0           # m — ignore detections beyond (too far to matter)
   slow_distance: 4.0           # m — nearest center obstacle below this -> slow
   stop_distance: 1.5           # m — nearest center obstacle below this -> stop
-  cruise_speed: 0.8            # m/s — clear corridor
-  slow_speed: 0.35             # m/s — caution
-  max_steer: 0.6               # rad — mirrors vehicle.yaml max_steering_angle
+  cruise_speed: 0.85           # m/s — clear corridor
+  slow_speed: 0.55             # m/s — caution
+  max_steer: 0.45              # rad — verified physical knuckle limit without saturation
   steer_gain: 0.5              # corridor-offset -> steer mapping gain
   # NOTE: stale perception -> speed 0 (stop), last steer held (mirrors controller failsafe)
 

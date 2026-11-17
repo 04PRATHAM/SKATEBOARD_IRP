@@ -1,0 +1,31 @@
+# Scenario S08: Unexpected Obstacle Introduced During Navigation
+# Objective: Vehicle begins cruising; obstacle placed along path is discovered through RGB-D,
+# triggering dynamic local replanning and safe detour.
+
+scenario_name: scenario_s08_unexpected_obstacle
+description: Unexpected obstacle along trajectory detected during vehicle cruise.
+
+vehicle_start_pose:
+  - 6.0
+  - -6.0
+  - 0.35
+  - 0.0
+
+vehicle_destination_pose:
+  - 13.5
+  - -6.0
+  - 0.0
+
+pedestrians: []
+
+static_obstacles:
+  - object_type: table
+    object_id: unexpected_table_01
+    position:
+      - 10.5
+      - -6.0
+      - 0.0
+    dimensions:
+      - 1.4
+      - 0.8
+      - 0.75

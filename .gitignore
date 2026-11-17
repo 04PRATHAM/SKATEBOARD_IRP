@@ -2,3 +2,36 @@
 *.pt
 __pycache__/
 *.pyc
+
+# Python environments and caches
+venv/
+.venv/
+perception_venv/
+__pycache__/
+*.py[cod]
+
+# Isaac Sim generated output and caches
+_example_output_isaacsim.sensors.experimental.rtx/
+kit/
+cache/
+logs/
+
+# ROS 2 generated output
+build/
+install/
+log/
+
+# Temporary editor and operating-system files
+*.swp
+*~
+.DS_Store
+
+# Generated simulation results and runtime evidence
+results/
+
+# Generated model-test visualizations
+data/model_tests/live_monitor/
+data/model_tests/path_visualizer/
+
+# Local backup patches
+*.patch

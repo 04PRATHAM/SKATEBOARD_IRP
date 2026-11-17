@@ -1,0 +1,58 @@
+# Scenario S12: No Safe Route
+# Objective: The corridor is completely barricaded across the entire walkable width.
+# Planner discovers no safe path exists, commands NO_SAFE_PATH, and halts vehicle safely without collision.
+# Acceptance Condition: Safe stop with zero collisions.
+
+scenario_name: scenario_s12_no_safe_route
+description: Complete corridor blockade; planner detects NO_SAFE_PATH and executes safe halt.
+
+vehicle_start_pose:
+  - 6.0
+  - -6.0
+  - 0.35
+  - 0.0
+
+vehicle_destination_pose:
+  - 13.5
+  - -6.0
+  - 0.0
+
+pedestrians: []
+
+static_obstacles:
+  - object_type: table
+    object_id: wall_barrier_00b
+    position: [10.0, -2.5, 0.0]
+    dimensions: [1.4, 1.0, 0.75]
+  - object_type: table
+    object_id: wall_barrier_00
+    position: [10.0, -3.5, 0.0]
+    dimensions: [1.4, 1.0, 0.75]
+  - object_type: table
+    object_id: wall_barrier_01
+    position: [10.0, -4.5, 0.0]
+    dimensions: [1.4, 1.0, 0.75]
+  - object_type: table
+    object_id: wall_barrier_02
+    position: [10.0, -5.5, 0.0]
+    dimensions: [1.4, 1.0, 0.75]
+  - object_type: table
+    object_id: wall_barrier_03
+    position: [10.0, -6.5, 0.0]
+    dimensions: [1.4, 1.0, 0.75]
+  - object_type: table
+    object_id: wall_barrier_04
+    position: [10.0, -7.5, 0.0]
+    dimensions: [1.4, 1.0, 0.75]
+  - object_type: table
+    object_id: wall_barrier_05
+    position: [10.0, -8.5, 0.0]
+    dimensions: [1.4, 1.0, 0.75]
+  - object_type: table
+    object_id: wall_barrier_06
+    position: [10.0, -9.5, 0.0]
+    dimensions: [1.4, 1.0, 0.75]
+  - object_type: table
+    object_id: wall_barrier_07
+    position: [10.0, -10.5, 0.0]
+    dimensions: [1.4, 1.0, 0.75]
