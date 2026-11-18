@@ -1,0 +1,46 @@
+# Target Object Categories for VIRYA Buggy Multi-Object Perception
+# Verified against yolo26n-seg.pt (COCO dataset class indexing)
+
+target_classes:
+  person:
+    id: 0
+    name: "person"
+    priority: 1  # Highest safety priority
+    color: [0, 255, 0]      # BGR: Bright Green
+    mask_color: [0, 255, 0] # BGR
+    min_confidence: 0.30
+
+  bench:
+    id: 13
+    name: "bench"
+    priority: 2
+    color: [0, 165, 255]    # BGR: Orange
+    mask_color: [0, 165, 255]
+    min_confidence: 0.25
+
+  chair:
+    id: 56
+    name: "chair"
+    priority: 2
+    color: [255, 144, 30]   # BGR: Dodger Blue
+    mask_color: [255, 144, 30]
+    min_confidence: 0.25
+
+  dining_table:
+    id: 60
+    name: "dining table"
+    priority: 2
+    color: [0, 215, 255]    # BGR: Gold / Yellow
+    mask_color: [0, 215, 255]
+    min_confidence: 0.25
+
+  table:
+    id: 60
+    name: "dining table"  # Mapped to COCO class 60 (COCO lacks a generic table class)
+    priority: 2
+    color: [0, 215, 255]
+    mask_color: [0, 215, 255]
+    min_confidence: 0.25
+
+# Class ID to Name mapping for fast lookups
+class_id_filter: [0, 13, 56, 60]

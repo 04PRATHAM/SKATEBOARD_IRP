@@ -1,0 +1,35 @@
+# Detection Configuration for VIRYA Buggy Perception Pipeline
+
+camera:
+  device_id: 0
+  api_backend: "V4L2"
+  width: 640
+  height: 480
+  fps: 30
+  max_reconnect_attempts: 5
+  reconnect_delay_sec: 1.0
+
+model:
+  weights_path: "/home/vat/yolo_vehicle_test/yolo26n-seg.pt"
+  device: "cpu"
+  default_confidence: 0.25
+  iou_threshold: 0.45
+  input_size: 640
+
+visualization:
+  draw_boxes: true
+  draw_masks: true
+  mask_alpha: 0.40
+  draw_labels: true
+  draw_confidences: true
+  draw_fps: true
+  draw_stats: true
+  line_thickness: 2
+  font_scale: 0.55
+
+driving_corridor:
+  enabled: true
+  # Normalized horizontal corridor [0.0, 1.0] representing vehicle swept path
+  left_boundary: 0.25   # 25% of image width
+  right_boundary: 0.75  # 75% of image width
+  corridor_color: [255, 0, 255] # Magenta
