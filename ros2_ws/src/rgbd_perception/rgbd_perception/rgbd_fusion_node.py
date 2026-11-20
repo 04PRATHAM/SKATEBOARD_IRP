@@ -196,9 +196,20 @@ class FusionNode(Node):
             prior_z = CLASS_DEPTH_PRIORS.get(raw_cid, CLASS_DEPTH_PRIORS.get(cid_str.split(":")[0], 0.50))
             if masks is not None:
                 mask_i = (masks == (i + 1))
-                val_pts = depth[mask_i & np.isfinite(depth) & (depth >= self.min_d) & (depth <= self.max_d)]
+                val_mask = mask_i & np.isfinite(depth) & (depth >= self.min_d) & (depth <= self.max_d)
+                val_pts = depth[val_mask]
                 if len(val_pts) >= 15:
+                    v_pts, u_pts = np.where(val_mask)
+                    x_pts = (u_pts - cx) * val_pts / fx
+                    y_pts = (v_pts - cy) * val_pts / fy
+                    x_spread = float(np.percentile(x_pts, 95) - np.percentile(x_pts, 5))
+                    y_spread = float(np.percentile(y_pts, 95) - np.percentile(y_pts, 5))
                     z_spread = float(np.percentile(val_pts, 90) - np.percentile(val_pts, 10))
+
+                    meas_sx = max(0.20, x_spread + 0.05)
+                    meas_sy = max(0.20, y_spread + 0.05)
+                    o.bbox.size.x = float(min(o.bbox.size.x, meas_sx))
+                    o.bbox.size.y = float(min(o.bbox.size.y, meas_sy))
                     phys_depth = max(prior_z, z_spread + 0.15)
                 else:
                     phys_depth = prior_z
@@ -220,7 +231,7 @@ class FusionNode(Node):
                 sub_m = masks[v_idx, u_idx]
                 unmasked = (sub_m == 0)
 
-            val_pts = unmasked & np.isfinite(sub_d) & (sub_d >= 0.8) & (sub_d <= 7.5)
+            val_pts = unmasked & np.isfinite(sub_d) & (sub_d >= 0.35) & (sub_d <= 8.0)
             if np.any(val_pts):
                 z_pts = sub_d[val_pts]
                 u_pts = u_idx[val_pts]
@@ -231,52 +242,85 @@ class FusionNode(Node):
 
                 # Exact height above ground z_v = H_cam - cos(pitch)*y - sin(pitch)*z
                 # H_cam = 1.2m, pitch = -0.15 rad: cos(0.15) = 0.9888, sin(0.15) = 0.1494
-                # z_v >= 0.28m ensures robust floor ground plane separation despite chassis pitch dynamics
+                # z_v in [0.20, 2.20] captures ground obstacles, walls, and pillars while rejecting the floor plane
                 z_v = 1.20 - 0.9888 * y_pts - 0.1494 * z_pts
-                is_obs = (z_v >= 0.28) & (z_v <= 1.80) & (np.abs(x_pts) < 1.8)
+                is_obs = (z_v >= 0.20) & (z_v <= 2.20) & (np.abs(x_pts) < 3.5)
 
-                if np.sum(is_obs) >= 15:
+                if np.sum(is_obs) >= 25:
                     xo = x_pts[is_obs]
                     yo = y_pts[is_obs]
                     zo = z_pts[is_obs]
 
-                    # Multi-obstacle clustering by depth continuity (split where depth gap > 0.80m)
+                    # Multi-obstacle clustering by depth continuity (split where depth gap > 0.45m)
                     order = np.argsort(zo)
                     xo_s = xo[order]
                     yo_s = yo[order]
                     zo_s = zo[order]
-                    split_idx = np.where(np.diff(zo_s) > 0.80)[0] + 1
+                    split_idx = np.where(np.diff(zo_s) > 0.45)[0] + 1
                     clusters = np.split(np.arange(len(zo_s)), split_idx)
 
                     for c_indices in clusters:
-                        if len(c_indices) >= 8:
-                            cx = xo_s[c_indices]
-                            cy = yo_s[c_indices]
-                            cz = zo_s[c_indices]
+                        if len(c_indices) >= 12:
+                            cl_x = xo_s[c_indices]
+                            cl_y = yo_s[c_indices]
+                            cl_z = zo_s[c_indices]
 
-                            # Further split by lateral X if multiple objects exist at similar depth (e.g. S09 narrow passage)
-                            x_order = np.argsort(cx)
-                            cx_s = cx[x_order]
-                            cy_s = cy[x_order]
-                            cz_s = cz[x_order]
-                            x_split = np.where(np.diff(cx_s) > 0.85)[0] + 1
+                            # Further split by lateral X if multiple objects exist at similar depth (split gap > 0.35m)
+                            x_order = np.argsort(cl_x)
+                            cx_s = cl_x[x_order]
+                            cy_s = cl_y[x_order]
+                            cz_s = cl_z[x_order]
+                            x_split = np.where(np.diff(cx_s) > 0.35)[0] + 1
                             sub_clusters = np.split(np.arange(len(cx_s)), x_split)
 
                             for sc_indices in sub_clusters:
-                                if len(sc_indices) >= 8:
+                                if len(sc_indices) >= 12:
                                     sc_x = cx_s[sc_indices]
                                     sc_y = cy_s[sc_indices]
                                     sc_z = cz_s[sc_indices]
 
-                                    med_x = float(np.median(sc_x))
-                                    med_y = float(np.median(sc_y))
-                                    med_z = float(np.median(sc_z))
+                                    min_x, max_x = float(np.min(sc_x)), float(np.max(sc_x))
+                                    min_y, max_y = float(np.min(sc_y)), float(np.max(sc_y))
+                                    min_z, max_z = float(np.min(sc_z)), float(np.max(sc_z))
+
+                                    ptp_x = max_x - min_x
+                                    ptp_y = max_y - min_y
+                                    ptp_z = max_z - min_z
+
+                                    # Accurate physical center: bounding box front aligns with nearest measured surface min_z
+                                    center_x = (min_x + max_x) / 2.0
+                                    center_y = (min_y + max_y) / 2.0
+
+                                    # Morphological classification into wall, pillar, or general obstacle
+                                    if ptp_x >= 1.60 and (abs(center_x) > 1.80 or min_z > 5.5):
+                                        cname = "wall"
+                                        cid = "-2:wall"
+                                        size_x = min(3.50, max(1.40, ptp_x + 0.20))
+                                        size_y = max(1.00, ptp_y + 0.20)
+                                        size_z = min(0.80, max(0.40, ptp_z + 0.20))
+                                    elif ptp_x <= 0.75 and ptp_y >= 0.65:
+                                        cname = "pillar"
+                                        cid = "-3:pillar"
+                                        size_x = min(0.80, max(0.40, ptp_x + 0.15))
+                                        size_y = max(0.90, ptp_y + 0.15)
+                                        size_z = min(0.80, max(0.40, ptp_z + 0.15))
+                                    else:
+                                        cname = "obstacle"
+                                        cid = "-1:obstacle"
+                                        size_x = min(1.50, max(0.35, ptp_x + 0.15))
+                                        size_y = max(0.35, ptp_y + 0.15)
+                                        size_z = min(1.20, max(0.35, ptp_z + 0.15))
+
+                                    center_z = min_z + size_z / 2.0
 
                                     is_duplicate = False
                                     for existing in out.detections:
                                         ex = existing.bbox.center.position.x
                                         ez = existing.bbox.center.position.z
-                                        if math.hypot(med_x - ex, med_z - ez) < 0.70:
+                                        # Deduplicate geometric cluster against existing YOLO 3D detections
+                                        dx = abs(center_x - ex)
+                                        dz = abs(center_z - ez)
+                                        if math.hypot(center_x - ex, center_z - ez) < 0.65 or (dx < 0.45 and dz < 0.65):
                                             is_duplicate = True
                                             break
 
@@ -284,17 +328,17 @@ class FusionNode(Node):
                                         o = Detection3D()
                                         o.header.stamp = det_msg.header.stamp
                                         o.header.frame_id = self.depth_frame
-                                        o.id = f"geom_obs_{len(out.detections)}"
+                                        o.id = f"geom_{cname}_{len(out.detections)}"
                                         h = ObjectHypothesisWithPose()
-                                        h.hypothesis.class_id = "obstacle"
-                                        h.hypothesis.score = 0.85
+                                        h.hypothesis.class_id = cid
+                                        h.hypothesis.score = 0.90
                                         o.results.append(h)
-                                        o.bbox.center.position.x = med_x
-                                        o.bbox.center.position.y = med_y
-                                        o.bbox.center.position.z = med_z
-                                        o.bbox.size.x = float(np.ptp(sc_x) + 0.3)
-                                        o.bbox.size.y = float(np.ptp(sc_y) + 0.3)
-                                        o.bbox.size.z = float(np.ptp(sc_z) + 0.3)
+                                        o.bbox.center.position.x = center_x
+                                        o.bbox.center.position.y = center_y
+                                        o.bbox.center.position.z = center_z
+                                        o.bbox.size.x = size_x
+                                        o.bbox.size.y = size_y
+                                        o.bbox.size.z = size_z
                                         out.detections.append(o)
                                         self.stats["objects"] += 1
 

@@ -275,15 +275,8 @@ def main():
     scen_path = resolve_scenario(args.scenario)
     scen_id = os.path.splitext(os.path.basename(scen_path))[0]
 
-    # Pre-simulation picker is enabled by default in GUI mode unless --no-pick or explicit --start/--goal given without --pick
-    if args.pick is True:
-        should_pick = True
-    elif args.no_pick or args.headless or not gui:
-        should_pick = False
-    elif args.start is not None or args.goal is not None:
-        should_pick = False
-    else:
-        should_pick = True
+    # Pre-simulation picker is enabled ONLY if --pick is explicitly passed
+    should_pick = bool(args.pick and not args.no_pick and gui and not args.headless)
 
     # Pre-simulation interactive point allotment if requested or running interactive GUI
     if should_pick:

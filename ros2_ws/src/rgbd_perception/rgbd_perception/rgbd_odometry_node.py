@@ -38,6 +38,7 @@ Publishes:
 import argparse
 import collections
 import math
+import os
 import sys
 import time
 
@@ -100,17 +101,24 @@ class RgbdOdometryNode(Node):
             import socket
             self.enc_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.enc_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                self.enc_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except AttributeError:
+                pass
             self.enc_sock.bind(("127.0.0.1", 9878))
             self.enc_sock.setblocking(False)
             self.has_enc_sock = True
-        except Exception:
+            self.get_logger().info("[ODOMETRY] Bound UDP socket on 127.0.0.1:9878 for physical wheel telemetry.")
+        except Exception as e:
             self.has_enc_sock = False
+            self.get_logger().warn(f"[ODOMETRY] Failed to bind UDP port 9878: {e}")
 
         # RGB-D Visual Motion & Wheel-Slip Estimator state
         self.v_visual = 0.0
         self.visual_conf = 0
         self.visual_conf_score = 0.0
         self.visual_residual_std = 0.0
+        self.visual_flow_px = 0.0
         self.last_visual_time = 0.0
         self.latest_rgb = None
         self.latest_depth = None
@@ -118,6 +126,7 @@ class RgbdOdometryNode(Node):
         self.prev_visual = None
         self.wheel_slip_detected = False
         self.slip_duration = 0.0
+        self.degraded_duration = 0.0
         self.odom_status = "NOMINAL"
         self.is_paused = False
         self.camera_k = None
@@ -133,6 +142,7 @@ class RgbdOdometryNode(Node):
         self.create_subscription(Clock, "/clock", self.on_clock, 10)
         self.create_subscription(PoseStamped, "/vehicle/reset_pose", self.on_reset_pose, 10)
         self.create_subscription(Bool, "/vehicle/pause_drive", self.on_pause_drive, 10)
+        self.create_subscription(TwistStamped, "/vehicle/wheel_encoder", self.on_wheel_encoder_ros, 10)
 
         # RGB-D image subscriptions for visual motion estimation (Best-Effort Sensor Data)
         self.create_subscription(Image, "/camera/rgb/image_raw", self.on_rgb, qos_profile_sensor_data)
@@ -247,8 +257,11 @@ class RgbdOdometryNode(Node):
 
         if len(p1) < 4:
             self.visual_conf_score = 0.05
+            self.visual_flow_px = 0.0
             self.prev_visual = (t_rgb, gray, depth)
             return
+
+        self.visual_flow_px = float(np.mean(np.linalg.norm(p2 - p1, axis=1)))
 
         # Scale coordinates to 640x480 depth image
         scale_x = depth.shape[1] / 320.0
@@ -331,6 +344,15 @@ class RgbdOdometryNode(Node):
         # Strictly eliminate fallback that integrates commanded speed as if it were measured movement.
         # self.speed and self.steer are ONLY set from physical encoder feedback (UDP 9878 or set_wheel_feedback).
 
+    def on_wheel_encoder_ros(self, msg: TwistStamped):
+        now = time.time()
+        self.speed = float(msg.twist.linear.x)
+        self.steer = float(msg.twist.angular.z)
+        if self.last_enc_time == 0.0 or (now - getattr(self, "_last_ros_enc_log", 0.0) > 5.0):
+            self._last_ros_enc_log = now
+            self.get_logger().info(f"[ODOMETRY] ROS Wheel encoder telemetry ACTIVE: speed={self.speed:.2f}m/s steer={self.steer:.2f}rad")
+        self.last_enc_time = now
+
     def on_reset_pose(self, msg: PoseStamped):
         self.x = float(msg.pose.position.x)
         self.y = float(msg.pose.position.y)
@@ -369,6 +391,9 @@ class RgbdOdometryNode(Node):
                     v_enc, s_enc = struct.unpack("ff", data)
                     self.speed = float(v_enc)
                     self.steer = float(s_enc)
+                    if not getattr(self, "_udp_enc_logged", False):
+                        self._udp_enc_logged = True
+                        self.get_logger().info(f"[ODOMETRY] Physical wheel encoder telemetry ACTIVE: speed={self.speed:.2f}m/s steer={self.steer:.2f}rad")
                     self.last_enc_time = now
             except BlockingIOError:
                 pass
@@ -384,8 +409,8 @@ class RgbdOdometryNode(Node):
             self.cmd_speed = 0.0
 
         delta = self.steer
-        # Calibrated 4-wheel Ackermann articulation steering efficiency
-        steer_efficiency = 0.80
+        # Calibrated 4-wheel Ackermann articulation steering efficiency (kinematic parity)
+        steer_efficiency = 1.00
         w_raw = steer_efficiency * (self.speed / self.wheelbase) * math.tan(delta)
         v_raw = self.speed * math.cos(delta)
 
@@ -401,7 +426,8 @@ class RgbdOdometryNode(Node):
 
         has_fresh_visual = (self.last_visual_time > 0.0) and (now - self.last_visual_time < 0.6)
         is_visual_confident = has_fresh_visual and (conf_score >= 0.30)
-        visual_stopped = (abs(self.v_visual) < 0.03)
+        # Physical blockage verification: both forward depth change and 2D optical flow must indicate lack of motion
+        visual_stopped = (abs(self.v_visual) < 0.03) and (getattr(self, "visual_flow_px", 0.0) < 1.2)
 
         if not is_commanded or self.is_paused:
             self.odom_status = "NOMINAL" if not self.is_paused else "PAUSED"
@@ -420,17 +446,18 @@ class RgbdOdometryNode(Node):
             v_eff = 0.0
             w = 0.0
         else:
-            # Wheels ARE turning under command. Physical displacement must be verified.
+            # Wheels ARE turning under command. Multi-tier physical displacement verification:
+            has_fresh_encoder = (self.last_enc_time > 0.0) and (now - self.last_enc_time < 0.40)
+
             if not has_fresh_visual:
-                # Camera stream interrupted: cannot verify physical motion.
-                # Strictly report degradation; DO NOT advance position on unverified wheel spin!
+                # Camera stream interrupted: cannot verify physical motion visually
                 self.odom_status = "CAM_INTERRUPTED"
                 self.slip_duration = 0.0
                 self.wheel_slip_detected = False
                 v_eff = 0.0
                 w = 0.0
             elif not is_visual_confident:
-                # Visual confidence degraded (blank wall / low texture / wedged into obstacle).
+                # Visual confidence degraded (blank wall / low texture / unverified wheel spin).
                 # Strictly report degradation; DO NOT advance position on unverified wheel spin!
                 self.odom_status = "VISUAL_DEGRADED"
                 self.slip_duration = 0.0
@@ -438,7 +465,7 @@ class RgbdOdometryNode(Node):
                 v_eff = 0.0
                 w = 0.0
             elif visual_stopped:
-                # Verified physical blockage in commanded direction (spinning against obstacle)
+                # Verified physical blockage in commanded direction (vision sees static world while wheels spin)
                 self.odom_status = "WHEEL_SLIP"
                 v_eff = float(self.v_visual)
                 w = 0.0
@@ -446,7 +473,7 @@ class RgbdOdometryNode(Node):
                 if self.slip_duration > 0.5:
                     self.wheel_slip_detected = True
             else:
-                # Verified legitimate movement in physical world (signed: forward or reverse)
+                # Verified legitimate movement in physical world (visual-inertial agreement)
                 self.odom_status = "NOMINAL"
                 self.slip_duration = 0.0
                 self.wheel_slip_detected = False
@@ -474,7 +501,7 @@ class RgbdOdometryNode(Node):
             v_eff = self.speed if not self.wheel_slip_detected else float(self.v_visual)
         if w is None:
             delta = self.steer
-            steer_efficiency = 0.80
+            steer_efficiency = 1.00
             w = steer_efficiency * (v_eff / self.wheelbase) * math.tan(delta) if not self.wheel_slip_detected else 0.0
 
         msg = Odometry()
@@ -506,11 +533,20 @@ def main():
         start_pose = [float(args.start[0]), float(args.start[1]), 0.35, yaw]
     elif args.scenario:
         try:
-            with open(args.scenario, "r") as f:
-                sc = yaml.safe_load(f)
+            from isaac_sim.scripts.scenarios.scenario_registry import resolve_scenario
+            entry = resolve_scenario(args.scenario)
+            if entry and os.path.exists(entry["path"]):
+                with open(entry["path"], "r") as f:
+                    sc = yaml.safe_load(f)
                 start_pose = sc.get("vehicle_start_pose")
         except Exception:
-            pass
+            if os.path.isfile(args.scenario):
+                try:
+                    with open(args.scenario, "r") as f:
+                        sc = yaml.safe_load(f)
+                    start_pose = sc.get("vehicle_start_pose")
+                except Exception:
+                    pass
 
     rclpy.init()
     node = RgbdOdometryNode(load_config(args.config), start_pose=start_pose)

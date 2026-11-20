@@ -60,6 +60,7 @@ class Track:
         self.size_x = 0.6
         self.size_y = 1.6
         self.size_z = 0.5
+        self.yaw = 0.0
         self.history = [(t, self.x, self.y, self.z)]
 
     def update(self, x: float, y: float, z: float, t: float, sx: float = 0.6, sy: float = 1.6, sz: float = 0.5, conf: float = 0.90):
@@ -86,6 +87,9 @@ class Track:
         self.size_x = sx
         self.size_y = sy
         self.size_z = sz
+        if self.speed > 0.15:
+            # Optical frame horizontal plane: -vx is left (vehicle +Y), vz is forward (vehicle +X)
+            self.yaw = math.atan2(-self.vx, self.vz)
         self.last_update = t
         self.hits += 1
         self.misses = 0
@@ -155,9 +159,7 @@ class DynamicTrackerNode(Node):
             self.depth_image = None
 
     def on_objects_3d(self, msg: Detection3DArray):
-        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        if t <= 0:
-            t = time.time()
+        t = time.time()
 
         detections = []
         for d in msg.detections:
@@ -230,7 +232,7 @@ class DynamicTrackerNode(Node):
                 if not inside_known:
                     candidates.append((X, Y, z))
 
-        if len(candidates) < 30:
+        if len(candidates) < 45:
             return []
 
         # Simple clustering: centroid of candidate points
@@ -291,8 +293,34 @@ class DynamicTrackerNode(Node):
         for tid, tr in self.tracks.items():
             if now - tr.last_update > self.max_age_sec:
                 to_del.append(tid)
-        for tid in to_del:
-            del self.tracks[tid]
+        if to_del:
+            for tid in to_del:
+                del self.tracks[tid]
+            stamp = self.get_clock().now().to_msg()
+            self._publish_tracks(stamp)
+            self._publish_marker_deletions(to_del, stamp)
+
+    def _publish_marker_deletions(self, deleted_ids: List[int], stamp):
+        del_arr = MarkerArray()
+        for tid in deleted_ids:
+            # Delete obstacle cylinder marker
+            m = Marker()
+            m.header.stamp = stamp
+            m.header.frame_id = self.depth_frame
+            m.ns = "obstacles"
+            m.id = int(tid)
+            m.action = Marker.DELETE
+            del_arr.markers.append(m)
+            # Delete trajectory line marker
+            m_traj = Marker()
+            m_traj.header.stamp = stamp
+            m_traj.header.frame_id = self.depth_frame
+            m_traj.ns = "trajectories"
+            m_traj.id = int(tid)
+            m_traj.action = Marker.DELETE
+            del_arr.markers.append(m_traj)
+        if del_arr.markers:
+            self.pub_markers.publish(del_arr)
 
     def _publish_tracks(self, stamp):
         out = Detection3DArray()
@@ -304,10 +332,14 @@ class DynamicTrackerNode(Node):
         diag_arr.header.frame_id = self.depth_frame
 
         marker_arr = MarkerArray()
-        m_id = 0
 
         for tr in self.tracks.values():
-            if tr.hits < 1:
+            # Suppress single-frame unclassified/geometric noise:
+            # Confirmed YOLO detections (person, table, chair, etc.) and structural depth clusters (wall, pillar) are published on frame 1 (hits >= 1).
+            # Unclassified noise clusters (class_id < 0 or unknown_obstacle) require hits >= 2.
+            is_confirmed = (tr.class_id >= 0 and tr.class_name not in ("unknown_obstacle", "obstacle") and tr.confidence >= 0.40) or (tr.class_name in ("wall", "pillar"))
+            min_hits = 1 if is_confirmed else 2
+            if tr.hits < min_hits:
                 continue
 
             # Detection3D message with standard ROS 2 semantics
@@ -339,6 +371,9 @@ class DynamicTrackerNode(Node):
             d3d.bbox.center.position.x = float(tr.x)
             d3d.bbox.center.position.y = float(tr.y)
             d3d.bbox.center.position.z = float(tr.z)
+            tr_yaw = getattr(tr, "yaw", 0.0)
+            d3d.bbox.center.orientation.z = math.sin(tr_yaw * 0.5)
+            d3d.bbox.center.orientation.w = math.cos(tr_yaw * 0.5)
             d3d.bbox.size.x = float(tr.size_x)
             d3d.bbox.size.y = float(tr.size_y)
             d3d.bbox.size.z = float(tr.size_z)
@@ -365,8 +400,7 @@ class DynamicTrackerNode(Node):
             m.header.stamp = stamp
             m.header.frame_id = self.depth_frame
             m.ns = "obstacles"
-            m.id = m_id
-            m_id += 1
+            m.id = int(tr.track_id)
             m.type = Marker.CYLINDER
             m.action = Marker.ADD
             m.pose.position.x = float(tr.x)
@@ -387,8 +421,7 @@ class DynamicTrackerNode(Node):
             m_pred.header.stamp = stamp
             m_pred.header.frame_id = self.depth_frame
             m_pred.ns = "trajectories"
-            m_pred.id = m_id
-            m_id += 1
+            m_pred.id = int(tr.track_id)
             m_pred.type = Marker.LINE_STRIP
             m_pred.action = Marker.ADD
             m_pred.scale.x = 0.08

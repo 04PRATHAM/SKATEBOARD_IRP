@@ -757,7 +757,7 @@ class ScenarioRunner:
         last_cmd_t = 0.0
         ros_steer = 0.0
         ros_speed = 0.0
-        if self.enable_ros and not use_wasd:
+        if self.enable_ros:
             try:
                 import socket
                 cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -766,10 +766,11 @@ class ScenarioRunner:
                     cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
                 except AttributeError:
                     pass
-                cmd_sock.bind(("127.0.0.1", 9876))
-                cmd_sock.setblocking(False)
+                if not use_wasd:
+                    cmd_sock.bind(("127.0.0.1", 9876))
+                    cmd_sock.setblocking(False)
+                    print("[ROS-CMD] Bound UDP socket on 127.0.0.1:9876 for autonomous vehicle driving.", flush=True)
                 enc_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                print("[ROS-CMD] Bound UDP socket on 127.0.0.1:9876 for autonomous vehicle driving.", flush=True)
             except Exception as e:
                 print(f"[ROS-CMD] Warning: UDP bind failed: {e}", flush=True)
                 cmd_sock = None
@@ -815,6 +816,8 @@ class ScenarioRunner:
                                         ros_steer = float(r_steer)
                                         ros_speed = float(r_speed)
                                         last_cmd_t = time.time()
+                                        if frame % int(0.5 / self.dt) == 0:
+                                            print(f"[RECV 9876] steer={ros_steer:.2f} speed={ros_speed:.2f}", flush=True)
                                 elif len(data) == 16:
                                     cmd_type, rx, ry, ryaw = struct.unpack("ffff", data)
                                     if cmd_type == -999.0:
@@ -827,8 +830,8 @@ class ScenarioRunner:
                                         last_cmd_t = time.time()
                         except BlockingIOError:
                             pass
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(f"[RECV 9876 EXCEPTION] {e}", flush=True)
                         if time.time() - last_cmd_t < 0.5:
                             steer_cmd = ros_steer
                             speed_cmd = ros_speed
@@ -857,7 +860,7 @@ class ScenarioRunner:
                             w_drive = min(abs(w_rl), abs(w_rr)) * (1.0 if (w_rl + w_rr) >= 0 else -1.0)
                         else:
                             w_drive = 0.5 * (w_rl + w_rr)
-                        wheel_r = float(self.vehicle_cfg.get("wheel_radius", 0.25)) * 0.78  # Calibrated effective loaded rolling radius under tire scrub
+                        wheel_r = float(self.vehicle_cfg.get("wheel_radius", 0.25)) * 0.915  # Calibrated effective loaded rolling radius under PhysX tire scrub
                         v_actual = w_drive * wheel_r
                         s_fl = float(j_pos[idx["Joint_Steer_FL"]]) if "Joint_Steer_FL" in idx else steer_cmd
                         s_fr = float(j_pos[idx["Joint_Steer_FR"]]) if "Joint_Steer_FR" in idx else steer_cmd

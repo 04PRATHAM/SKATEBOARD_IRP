@@ -46,7 +46,7 @@ PERCEPTION_PYTHON = "/home/ubuntu/perception_venv/bin/python"
 ROS_SETUP = "/opt/ros/humble/setup.bash"
 SIM_ROSLIBS = "/home/ubuntu/isaacsim-6.2.0/exts/isaacsim.ros2.core/humble/lib"
 PERCEPTION_ROSLIBS = "/home/ubuntu/ros_overlay/opt/ros/humble/lib:/opt/ros/humble/lib"
-ROSPYTHON = "/home/ubuntu/ros_overlay/opt/ros/humble/local/lib/python3.10/dist-packages"
+ROSPYTHON = f"/home/ubuntu/ros_overlay/opt/ros/humble/local/lib/python3.10/dist-packages:{ROOT}/ros2_ws/src/rgbd_perception"
 
 SCEN_DIR = os.path.join(ROOT, "configs/scenarios")
 
@@ -279,18 +279,16 @@ def run_scenario(scen: Dict[str, Any], results_root: Path, duration: float, head
         cwd=ROOT, preexec_fn=os.setsid, stdout=vis_log, stderr=subprocess.STDOUT
     )
 
-    mon_proc = None
-    if not headless:
-        mon_log = open(scen_out_dir / "monitor.log", "w")
-        mon_cmd = f"isaac_sim/scripts/testing/live_perception_monitor.py --scenario {scen['id']} --out-dir {results_root / scen['name'] / 'live_monitor'} --save-every 2"
-        mon_proc = subprocess.Popen(
-            ["bash", "-c", env_sh + f"{PERCEPTION_PYTHON} {mon_cmd}"],
-            cwd=ROOT, preexec_fn=os.setsid, stdout=mon_log, stderr=subprocess.STDOUT
-        )
+    mon_log = open(scen_out_dir / "monitor.log", "w")
+    mon_cmd = f"isaac_sim/scripts/testing/live_perception_monitor.py --scenario {scen['id']} --out-dir {results_root / scen['name'] / 'live_monitor'} --save-every 2.0"
+    if headless:
+        mon_cmd += " --no-show"
+    mon_proc = subprocess.Popen(
+        ["bash", "-c", env_sh + f"{PERCEPTION_PYTHON} {mon_cmd}"],
+        cwd=ROOT, preexec_fn=os.setsid, stdout=mon_log, stderr=subprocess.STDOUT
+    )
 
-    all_subprocs = [sim_proc, yolo_proc, fusion_proc, tracker_proc, odom_proc, planner_proc, vis_proc]
-    if mon_proc is not None:
-        all_subprocs.append(mon_proc)
+    all_subprocs = [sim_proc, yolo_proc, fusion_proc, tracker_proc, odom_proc, planner_proc, vis_proc, mon_proc]
 
     # Load scenario YAML for ground-truth obstacles and clearance evaluation
     import yaml

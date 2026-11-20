@@ -69,13 +69,14 @@ def test_swept_clearances():
     # Case 4: Executing Multi-Obstacle Detour using Planner Ackermann Offset Generator
     print("\n--- CASE 4: Multi-Obstacle Detour ---")
     staggered_obs = [
-        {"x_world": 9.5, "y_world": -6.0, "size_x": 0.8, "size_z": 0.8},
+        {"x_world": 10.0, "y_world": -6.0, "size_x": 0.8, "size_z": 0.8},
     ]
-    # Planner generated smooth detour path (obstacle detected at nominal 3.5m range)
-    weave_path = planner._generate_offset_path(1.45, obs_dist=3.5, max_obs_dist=4.5)
+    # Planner generated smooth detour path (obstacle detected at nominal 4.0m range)
+    weave_path = planner._generate_offset_path(1.35, obs_dist=4.0, max_obs_dist=4.0)
     safe_w, clr_w, reason_w = planner._check_path_clearance(weave_path, staggered_obs)
     print(f"  Generated Smooth Detour Path: Safe={safe_w} | Clearance={clr_w:.2f}m | Reason={reason_w}")
     assert safe_w, f"Planner detour path rejected: {reason_w}"
+    assert clr_w >= 0.15, f"Clearance insufficient: {clr_w}"
     results["multi_obstacle"] = {"safe": safe_w, "clearance": clr_w}
 
     # Case 5: Encountering a Fully Blocked Route (barricade across y=-6.8 to -3.8 at x=9.0)

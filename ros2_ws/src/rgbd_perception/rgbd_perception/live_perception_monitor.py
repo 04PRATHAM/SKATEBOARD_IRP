@@ -1,0 +1,536 @@
+"""Live Perception Monitor — SKATEBOARD_IRP (WINDOW 2).
+
+Displays a live OpenCV Qt GUI window showing:
+  - Real-time RGB camera stream with YOLO bounding boxes, segmentation masks,
+    class labels, confidence scores, estimated depth and 3D vehicle coordinates.
+  - Standby diagnostics canvas when simulation stream is connecting.
+  - HUD overlay: frame rates (RGB, Depth, YOLO, 3D Fusion), latency, counts.
+  - Periodic annotated PNG snapshot saving into data/live_monitor/.
+
+Runs as an external process (system Python 3.10 + perception_venv / rclpy),
+separate from Isaac Sim and path planning visualizer.
+"""
+
+import argparse
+import math
+import os
+import sys
+import time
+from collections import deque
+from pathlib import Path
+
+sys.path.insert(0, "/home/ubuntu/SKATEBOARD_IRP")
+sys.path.insert(0, "/home/ubuntu/SKATEBOARD_IRP/ros2_ws/src/rgbd_perception")
+
+import cv2
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from sensor_msgs.msg import Image, CameraInfo
+from std_msgs.msg import String
+from vision_msgs.msg import Detection2DArray, Detection3DArray
+
+try:
+    from isaac_sim.scripts.scenarios.scenario_registry import resolve_scenario, get_scenario
+except Exception:
+    resolve_scenario = None
+    get_scenario = None
+
+BEST_EFFORT_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+)
+RELIABLE_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.RELIABLE,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=5,
+)
+
+# Colour palette for class IDs (hue-based, COCO)
+CLASS_COLORS = {
+    0:  (0,   220,  60),  # person: vibrant green
+    13: (200,  80,  20),  # bench: orange
+    56: (50,  100, 220),  # chair: blue
+    57: (220,  50, 200),  # couch: magenta
+    60: (220, 180,  20),  # dining table: golden yellow
+}
+DEFAULT_COLOR = (180, 180, 180)
+
+
+def parse_class(class_id_str: str):
+    """Parse class_id string like '0:person' -> (0, 'person')."""
+    try:
+        parts = str(class_id_str).split(":", 1)
+        cid = int(parts[0])
+        lbl = parts[1] if len(parts) > 1 else str(cid)
+        return cid, lbl
+    except Exception:
+        return -1, str(class_id_str)
+
+
+class LiveMonitor(Node):
+    def __init__(self, args):
+        super().__init__("live_perception_monitor")
+        self.args = args
+        self.out_dir = Path(args.out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.title = args.window_title
+        self.save_every = args.save_every  # save annotated frame every N seconds
+        self._last_save = time.time()
+        self._start_time = time.time()
+
+        # Latest data
+        self._rgb: np.ndarray | None = None
+        self._rgb_stamp: float = 0.0
+        self._last_rgb_wall_time: float = 0.0
+        self._last_depth_wall_time: float = 0.0
+        self._last_depth_print_time: float = 0.0
+        self._cam_info: CameraInfo | None = None
+        self._fx: float = 0.0
+        self._fy: float = 0.0
+        self._cx: float = 0.0
+        self._cy: float = 0.0
+        self._depth_stats: dict = {"valid": 0.0, "min": 0.0, "max": 0.0}
+        self._dets = []   # list of Detection2D
+        self._objs = []   # list of Detection3D
+        self._mask: np.ndarray | None = None
+        self._det_stamp: float = 0.0
+        self._obj_stamp: float = 0.0
+
+        # Rate tracking
+        self._rgb_times: deque = deque(maxlen=60)
+        self._depth_times: deque = deque(maxlen=60)
+        self._det_times: deque = deque(maxlen=60)
+        self._obj_times: deque = deque(maxlen=60)
+        self._det_latencies: deque = deque(maxlen=60)
+
+        self._frame_count: int = 0
+        self._save_idx: int = 0
+        self._first_rgb_logged = False
+        self._first_depth_logged = False
+        self._first_det_logged = False
+        self._first_obj_logged = False
+
+        # Scenario identification & title
+        self.scenario_id = getattr(args, "scenario", "s01")
+        self.scenario_name = ""
+        if resolve_scenario:
+            try:
+                entry = resolve_scenario(self.scenario_id)
+                self.scenario_name = entry.name
+            except Exception:
+                self.scenario_name = ""
+
+        # Subscriptions
+        self.sub_rgb = self.create_subscription(Image, "/camera/rgb/image_raw", self._on_rgb, BEST_EFFORT_QOS)
+        self.sub_depth = self.create_subscription(Image, "/camera/depth/image_raw", self._on_depth, BEST_EFFORT_QOS)
+        self.sub_cam_info = self.create_subscription(CameraInfo, "/camera/depth/camera_info", self._on_info, BEST_EFFORT_QOS)
+        self.sub_dets = self.create_subscription(Detection2DArray, "/perception/detections_2d", self._on_dets, RELIABLE_QOS)
+        self.sub_mask = self.create_subscription(Image, "/perception/masks", self._on_mask, RELIABLE_QOS)
+        self.sub_objs = self.create_subscription(Detection3DArray, "/perception/objects_3d", self._on_objs, RELIABLE_QOS)
+        self.sub_scen = self.create_subscription(String, "/planning/scenario_id", self._on_scenario, RELIABLE_QOS)
+
+        # Explicit terminal diagnostics as requested
+        self.get_logger().info("[LIVE MONITOR] ROS node initialized")
+        self.get_logger().info("[LIVE MONITOR] RGB subscription connected: /camera/rgb/image_raw")
+        self.get_logger().info("[LIVE MONITOR] Depth subscription connected: /camera/depth/image_raw")
+        self.get_logger().info("[LIVE MONITOR] CameraInfo subscription connected: /camera/depth/camera_info")
+        self.get_logger().info("[LIVE MONITOR] Detections subscription connected: /perception/detections_2d")
+        self.get_logger().info("[LIVE MONITOR] Masks subscription connected: /perception/masks")
+        self.get_logger().info("[LIVE MONITOR] 3D Objects subscription connected: /perception/objects_3d")
+
+        if args.show:
+            cv2.namedWindow(self.title, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(self.title, 960, 540)
+            cv2.moveWindow(self.title, 960, 0)
+            # Render initial standby frame immediately to map window to display
+            self._render_standby_frame()
+
+        # Dedicated 25 Hz rendering and GUI event pumping timer (prevents starvation)
+        self.render_timer = self.create_timer(0.04, self._on_render_timer)
+        self.get_logger().info(f"[LIVE MONITOR] Ready. Rendering loop active at 25 Hz. Window: '{self.title}'")
+
+    # -------- callbacks --------
+
+    def _on_mask(self, msg: Image):
+        try:
+            if msg.encoding == "mono8":
+                self._mask = np.frombuffer(msg.data, dtype=np.uint8).reshape((msg.height, msg.width))
+        except Exception:
+            pass
+
+    def _on_rgb(self, msg: Image):
+        now = time.time()
+        self._rgb_times.append(now)
+        self._last_rgb_wall_time = now
+
+        try:
+            enc = msg.encoding.lower()
+            if enc == "rgb8":
+                arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
+                self._rgb = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            elif enc == "bgr8":
+                arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
+                self._rgb = arr.copy()
+            elif enc == "rgba8":
+                arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 4)
+                self._rgb = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+            elif enc == "bgra8":
+                arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 4)
+                self._rgb = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+            elif enc == "mono8":
+                arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width)
+                self._rgb = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+            else:
+                # Fallback: assume 3 channels
+                arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
+                self._rgb = arr[:, :, :3].copy()
+            self._rgb_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+            if not self._first_rgb_logged:
+                self._first_rgb_logged = True
+                self.get_logger().info(f"[LIVE MONITOR] First RGB frame received ({msg.width}x{msg.height}, encoding={msg.encoding})")
+        except Exception as e:
+            self.get_logger().warn(f"Error parsing RGB frame: {e}")
+
+    def _on_info(self, msg: CameraInfo):
+        self._cam_info = msg
+        if len(msg.k) >= 9:
+            self._fx = float(msg.k[0])
+            self._cx = float(msg.k[2])
+            self._fy = float(msg.k[4])
+            self._cy = float(msg.k[5])
+
+    def _on_depth(self, msg: Image):
+        now = time.time()
+        self._depth_times.append(now)
+        self._last_depth_wall_time = now
+
+        try:
+            if msg.encoding.lower() in ("32fc1", "32f"):
+                arr = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
+            elif msg.encoding.lower() in ("16uc1", "16u"):
+                arr = np.frombuffer(msg.data, dtype=np.uint16).reshape(msg.height, msg.width).astype(np.float32) * 0.001
+            else:
+                arr = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
+
+            valid_mask = np.isfinite(arr) & (arr > 0.05) & (arr < 30.0)
+            n_valid = int(np.count_nonzero(valid_mask))
+            total_px = arr.size
+            pct_valid = (n_valid / total_px * 100.0) if total_px > 0 else 0.0
+            min_d = float(np.min(arr[valid_mask])) if n_valid > 0 else 0.0
+            max_d = float(np.max(arr[valid_mask])) if n_valid > 0 else 0.0
+            self._depth_stats = {"valid": pct_valid, "min": min_d, "max": max_d}
+        except Exception:
+            pct_valid = self._depth_stats.get("valid", 0.0)
+            min_d = self._depth_stats.get("min", 0.0)
+            max_d = self._depth_stats.get("max", 0.0)
+
+        rate = self._rate(self._depth_times)
+        intr_str = f"fx={self._fx:.1f},fy={self._fy:.1f},cx={self._cx:.1f},cy={self._cy:.1f}" if self._fx > 0 else "Pending"
+        stamp_str = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
+
+        if not self._first_depth_logged:
+            self._first_depth_logged = True
+            self.get_logger().info(f"[LIVE MONITOR] First Depth frame received ({msg.width}x{msg.height}, encoding={msg.encoding})")
+
+        if now - self._last_depth_print_time >= 2.0:
+            self._last_depth_print_time = now
+            self.get_logger().info(
+                f"[DEPTH CAMERA] Frame received: {msg.width}x{msg.height} {msg.encoding} | "
+                f"Rate: {rate:.1f} Hz | Valid: {pct_valid:.1f}% | Min: {min_d:.2f}m | Max: {max_d:.2f}m | "
+                f"Intrinsics: {intr_str} | Stamp: {stamp_str} | Status: NOMINAL"
+            )
+
+    def _on_dets(self, msg: Detection2DArray):
+        now = time.time()
+        self._det_times.append(now)
+        self._dets = list(msg.detections)
+        self._det_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if getattr(self, "_last_rgb_wall_time", 0.0) > 0.0:
+            lat = (now - self._last_rgb_wall_time) * 1000.0
+            if 0.0 <= lat < 2000.0:
+                self._det_latencies.append(lat)
+        if not self._first_det_logged and len(self._dets) > 0:
+            self._first_det_logged = True
+            self.get_logger().info(f"[LIVE MONITOR] First YOLO detection array received ({len(self._dets)} objects)")
+
+    def _on_objs(self, msg: Detection3DArray):
+        now = time.time()
+        self._obj_times.append(now)
+        self._objs = list(msg.detections)
+        self._obj_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if not self._first_obj_logged and len(self._objs) > 0:
+            self._first_obj_logged = True
+            self.get_logger().info(f"[LIVE MONITOR] First 3D object array received ({len(self._objs)} 3D obstacles)")
+
+    def _on_scenario(self, msg: String):
+        self.scenario_id = msg.data.strip().lower()
+        if resolve_scenario:
+            try:
+                entry = resolve_scenario(self.scenario_id)
+                self.scenario_name = entry.name
+            except Exception:
+                self.scenario_name = self.scenario_id
+        else:
+            self.scenario_name = self.scenario_id
+        self.get_logger().info(f"[LIVE MONITOR] Active scenario updated: {self.scenario_id.upper()} ({self.scenario_name})")
+
+    # -------- rendering --------
+
+    def _rate(self, times: deque) -> float:
+        if len(times) < 2:
+            return 0.0
+        dt = times[-1] - times[0]
+        return (len(times) - 1) / dt if dt > 0 else 0.0
+
+    def _render_standby_frame(self):
+        """Render a crisp, informative standby screen when awaiting the RGB camera stream."""
+        w, h = 960, 540
+        canvas = np.zeros((h, w, 3), dtype=np.uint8)
+        canvas[:] = (24, 28, 36)
+
+        # Header
+        cv2.rectangle(canvas, (0, 0), (w, 50), (16, 18, 24), -1)
+        cv2.putText(canvas, "SKATEBOARD_IRP -- LIVE RGB-D PERCEPTION MONITOR (WINDOW 2)", (18, 32),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 255), 2, cv2.LINE_AA)
+
+        # Active scenario banner
+        scen_str = f"SCENARIO: {self.scenario_id.upper()}"
+        if self.scenario_name:
+            scen_str += f" ({self.scenario_name})"
+        cv2.putText(canvas, scen_str, (18, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # Topic Status Panel
+        cv2.rectangle(canvas, (20, 110), (w - 20, 420), (32, 36, 48), -1)
+        cv2.rectangle(canvas, (20, 110), (w - 20, 420), (60, 70, 90), 1)
+
+        cv2.putText(canvas, "SENSOR & TOPIC CONNECTION STATUS", (35, 140),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 220, 255), 2, cv2.LINE_AA)
+
+        topics_status = [
+            ("/camera/rgb/image_raw", len(self._rgb_times) > 0, self._rate(self._rgb_times), "Awaiting Isaac Sim Camera Helper..."),
+            ("/camera/depth/image_raw", len(self._depth_times) > 0, self._rate(self._depth_times), "Awaiting Depth stream..."),
+            ("/perception/detections_2d", len(self._det_times) > 0, self._rate(self._det_times), "Awaiting YOLOv8-seg inference..."),
+            ("/perception/masks", self._mask is not None, 0.0, "Awaiting YOLO segmentation mask..."),
+            ("/perception/objects_3d", len(self._obj_times) > 0, self._rate(self._obj_times), "Awaiting 3D RGB-D Fusion..."),
+        ]
+
+        y_pos = 180
+        for topic, active, rate_val, wait_msg in topics_status:
+            col = (50, 220, 80) if active else (40, 150, 255)
+            badge = f"[CONNECTED {rate_val:.1f} Hz]" if active else "[WAITING]"
+            cv2.putText(canvas, topic, (40, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (240, 240, 240), 1, cv2.LINE_AA)
+            cv2.putText(canvas, badge, (340, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.50, col, 2, cv2.LINE_AA)
+            detail = f"Active ({rate_val:.1f} FPS)" if active else wait_msg
+            cv2.putText(canvas, detail, (530, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 170, 180), 1, cv2.LINE_AA)
+            y_pos += 45
+
+        # Footer instructions
+        elapsed = time.time() - self._start_time
+        spinner = ["|", "/", "-", "\\"][int(elapsed * 4) % 4]
+        cv2.putText(canvas, f"{spinner} Listening on ROS 2 Humble DDS (DISPLAY=:1)...",
+                    (35, 455), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 220, 255), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "Launch Isaac Sim 6.2 or Scenario Runner to stream simulation frames.",
+                    (35, 485), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (180, 180, 180), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f"Time: {time.strftime('%H:%M:%S')} | Press 'q' or Esc to exit",
+                    (35, 515), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (130, 140, 150), 1, cv2.LINE_AA)
+
+        if self.args.show:
+            cv2.imshow(self.title, canvas)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q') or key == 27:
+                rclpy.shutdown()
+
+    def _on_render_timer(self):
+        """Called at 25 Hz by ROS timer to guarantee responsive GUI and pump window events."""
+        if self._rgb is None:
+            self._render_standby_frame()
+        else:
+            self._redraw()
+
+    def _redraw(self):
+        if self._rgb is None:
+            return
+
+        canvas = self._rgb.copy()
+        h, w = canvas.shape[:2]
+
+        # --- Draw Segmentation Masks (semi-transparent overlay) ---
+        if self._mask is not None:
+            try:
+                mask_h, mask_w = self._mask.shape[:2]
+                if (mask_h, mask_w) != (h, w):
+                    mask_resized = cv2.resize(self._mask, (w, h), interpolation=cv2.INTER_NEAREST)
+                else:
+                    mask_resized = self._mask
+
+                overlay = canvas.copy()
+                has_overlay = False
+                for i, det in enumerate(self._dets):
+                    try:
+                        cid, _ = parse_class(det.results[0].hypothesis.class_id if det.results else "-1:?")
+                        color = CLASS_COLORS.get(cid, DEFAULT_COLOR)
+                        pixel_idx = i + 1
+                        mask_match = (mask_resized == pixel_idx)
+                        if np.any(mask_match):
+                            overlay[mask_match] = color
+                            has_overlay = True
+                    except Exception:
+                        pass
+                if has_overlay:
+                    cv2.addWeighted(overlay, 0.40, canvas, 0.60, 0, canvas)
+            except Exception:
+                pass
+
+        # --- Draw YOLO 2D detections ---
+        depth_by_idx: dict = {}
+        xyz_by_idx: dict = {}
+        for obj in self._objs:
+            try:
+                obj_id = getattr(obj, "id", "")
+                if obj_id.startswith("yolo_det_"):
+                    det_idx = int(obj_id.split("_")[-1])
+                    t = obj.bbox.center.position
+                    if 0 <= det_idx < len(self._dets) and 0.30 <= t.z <= 15.00:
+                        depth_by_idx[det_idx] = math.sqrt(t.x**2 + t.y**2 + t.z**2)
+                        xyz_by_idx[det_idx] = (t.x, t.y, t.z)
+            except Exception:
+                pass
+
+        for i, det in enumerate(self._dets):
+            try:
+                cid, lbl = parse_class(
+                    det.results[0].hypothesis.class_id if det.results else "-1:?"
+                )
+                conf = det.results[0].hypothesis.score if det.results else 0.0
+                bx = det.bbox.center.position.x
+                by = det.bbox.center.position.y
+                bw = det.bbox.size_x
+                bh = det.bbox.size_y
+                x1, y1 = max(0, int(bx - bw / 2)), max(0, int(by - bh / 2))
+                x2, y2 = min(w - 1, int(bx + bw / 2)), min(h - 1, int(by + bh / 2))
+                color = CLASS_COLORS.get(cid, DEFAULT_COLOR)
+
+                # Bounding box
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
+
+                # Label text
+                dist_str = ""
+                if i in depth_by_idx:
+                    x3, y3, z3 = xyz_by_idx[i]
+                    dist_str = f" | {depth_by_idx[i]:.2f}m [{x3:+.1f},{z3:+.1f}m]"
+
+                label = f"{lbl} {conf:.2f}{dist_str}"
+                (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                cv2.rectangle(canvas, (x1, max(0, y1 - lh - 6)), (x1 + lw + 6, max(0, y1)), color, -1)
+                cv2.putText(canvas, label, (x1 + 3, max(lh + 2, y1 - 4)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+            except Exception:
+                pass
+
+        # --- Draw 3D detections summary banner ---
+        top_h = 32
+        now_wall = time.time()
+        rgb_age = now_wall - self._last_rgb_wall_time if getattr(self, "_last_rgb_wall_time", 0.0) > 0 else 999.0
+        depth_age = now_wall - self._last_depth_wall_time if getattr(self, "_last_depth_wall_time", 0.0) > 0 else 999.0
+        max_age = max(rgb_age, depth_age)
+        if max_age < 0.60:
+            health_str = "RGB-D PERCEPTION: NOMINAL"
+            health_color = (0, 220, 80)
+        elif max_age < 2.0:
+            health_str = "RGB-D PERCEPTION: HIGH LATENCY"
+            health_color = (0, 180, 255)
+        else:
+            health_str = "RGB-D PERCEPTION: STREAM INTERRUPTED"
+            health_color = (0, 0, 240)
+
+        cv2.rectangle(canvas, (0, 0), (w, top_h), (20, 22, 28), -1)
+        scen_title_str = f"SCENARIO {self.scenario_id.upper()}: {self.scenario_name}" if self.scenario_name else f"SCENARIO: {self.scenario_id.upper()}"
+        cv2.putText(canvas, scen_title_str, (12, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(canvas, health_str, (w - 320, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.50, health_color, 2, cv2.LINE_AA)
+
+        # --- HUD metrics bar at bottom ---
+        rgb_fps = self._rate(self._rgb_times)
+        depth_fps = self._rate(self._depth_times)
+        det_fps = self._rate(self._det_times)
+        obj_fps = self._rate(self._obj_times)
+        lat_ms = float(np.mean(list(self._det_latencies))) if self._det_latencies else 0.0
+        n_det = len(self._dets)
+        n_obj = len(self._objs)
+
+        hud_lines = [
+            f"RGB {rgb_fps:.1f} Hz | Depth {depth_fps:.1f} Hz | YOLO {det_fps:.1f} Hz | Fusion {obj_fps:.1f} Hz",
+            f"Detections: {n_det} | 3D Obstacles: {n_obj} | YOLO Latency: {lat_ms:.0f}ms",
+            f"Frame {self._frame_count} | {time.strftime('%H:%M:%S')} | DISPLAY=:1",
+        ]
+        bar_h = len(hud_lines) * 20 + 8
+        cv2.rectangle(canvas, (0, h - bar_h), (w, h), (18, 20, 24), -1)
+        for li, line in enumerate(hud_lines):
+            cv2.putText(canvas, line, (8, h - bar_h + 16 + li * 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 255, 200), 1, cv2.LINE_AA)
+
+        self._frame_count += 1
+
+        # --- Show and save ---
+        if self.args.show:
+            cv2.imshow(self.title, canvas)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q') or key == 27:
+                rclpy.shutdown()
+                return
+
+        now = time.time()
+        if self.save_every > 0 and (now - self._last_save >= self.save_every):
+            fname = self.out_dir / f"monitor_frame_{self._save_idx:05d}.png"
+            cv2.imwrite(str(fname), canvas)
+            self._save_idx += 1
+            self._last_save = now
+            self.get_logger().info(
+                f"[LIVE MONITOR] Saved {fname.name} | RGB {rgb_fps:.1f}Hz Det {det_fps:.1f}Hz "
+                f"Fusion {obj_fps:.1f}Hz n_det={n_det} n_3d={n_obj}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="SKATEBOARD Live RGB-D Perception Monitor")
+    ap.add_argument("--scenario", default="s02", help="Active scenario ID or name")
+    ap.add_argument("--out-dir", default="/home/ubuntu/SKATEBOARD_IRP/data/live_monitor")
+    ap.add_argument("--window-title", default="Window 2 - Live YOLOv8-seg & 3D Perception Monitor")
+    ap.add_argument("--save-every", type=float, default=2.0,
+                    help="Save annotated frame every N seconds (0 = never)")
+    ap.add_argument("--no-show", dest="show", action="store_false", default=True,
+                    help="Headless: write frames but do not open a window")
+    ap.add_argument("--duration", type=float, default=0.0,
+                    help="Auto-stop after N seconds (0 = run until Ctrl+C)")
+    args = ap.parse_args()
+
+    rclpy.init()
+    node = LiveMonitor(args)
+    t0 = time.time()
+    try:
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.05)
+            if args.duration > 0 and (time.time() - t0) > args.duration:
+                node.get_logger().info(f"[LIVE MONITOR] Duration {args.duration}s reached -- stopping.")
+                break
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        if args.show:
+            cv2.destroyAllWindows()
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()

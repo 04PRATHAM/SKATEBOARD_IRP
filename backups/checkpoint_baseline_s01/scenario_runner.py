@@ -1,0 +1,1081 @@
+print("[SCRIPT START] Module loading...", flush=True)
+
+import sys
+import os
+import yaml
+import time
+import argparse
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional, Any
+from pathlib import Path
+
+# Add project root to path
+sys.path.insert(0, "/home/ubuntu/SKATEBOARD_IRP")
+
+# Parse args FIRST, then create SimulationApp, then import other Isaac Sim modules
+parser = argparse.ArgumentParser(description="SKATEBOARD_IRP M8 Scenario Runner")
+parser.add_argument("scenario", nargs="?", help="Path to scenario YAML file or scenario ID (s01..s13)")
+parser.add_argument("--scenario", dest="scenario_opt", default=None, help="Path to scenario YAML file or scenario ID (s01..s13)")
+parser.add_argument("--start", nargs="+", type=float, default=None, help="Allotted vehicle start pose [x, y, (yaw)]")
+parser.add_argument("--goal", nargs="+", type=float, default=None, help="Allotted vehicle destination pose [x, y, (yaw)]")
+parser.add_argument("--all", action="store_true", help="Run all scenarios in configs/scenarios/")
+parser.add_argument("--headless", action="store_true", help="Run headless")
+parser.add_argument("--ros", action="store_true", help="Enable ROS 2 bridge")
+parser.add_argument("--gui", action="store_true", help="GUI mode (stays open for inspection)")
+parser.add_argument("--duration", type=float, default=60.0, help="Max duration per scenario (seconds)")
+parser.add_argument("--wasd", action="store_true", help="Enable WASD manual control")
+args, unknown = parser.parse_known_args()
+
+print("[BEFORE SIM] About to create SimulationApp", flush=True)
+
+# Now create SimulationApp
+from isaacsim import SimulationApp
+sim = SimulationApp({"headless": args.headless, "renderer": "RayTracedLighting"})
+
+print("[SIM CREATED] SimulationApp created", flush=True)
+
+# Now import other Isaac Sim modules AFTER SimulationApp is created
+import sys
+import os
+import yaml
+import time
+import math
+import numpy as np
+import omni.usd
+from pxr import Usd, UsdGeom, UsdPhysics, Gf
+
+from isaacsim.core.api import World
+from isaacsim.core.prims import Articulation
+from isaac_sim.scripts.utils.world_setup import build_world, RGBD_CAMERA_PRIM
+from isaac_sim.scripts.assets.pedestrian import (
+    PedestrianConfig, PedestrianType, Pedestrian, 
+    create_pedestrian_from_dict, PedestrianGroundTruth
+)
+# Realistic human upgrades
+# 2026-09-16: segmented human (capsule head/torso/arms/legs + procedural walk) via realistic_pedestrian.py
+# 2026-09-17: REAL S3 human (SkelRoot + Skinned Mesh + Skeleton + Biped anim graph) via real_human.py
+# Runner chooses based on per-pedestrian flags:
+#   is_real_human / use_real_human -> S3 RealHuman (photoreal SkelRoot asset, preferred for GUI evidence)
+#   is_realistic / variant_idx      -> SEGMENTED primitive-assembly human (fast headless fallback, NOT S3)
+#   otherwise                       -> capsule pedestrian (legacy)
+# Naming rule (hard rule 7): NEVER log "REALISTIC" for the segmented tier;
+# "REALISTIC" is reserved for verified S3 SkelRoot assets (see verify_spawned_tier below).
+try:
+    from isaac_sim.scripts.assets.realistic_pedestrian import (
+        create_realistic_pedestrian_from_dict as _create_realistic_from_dict
+    )
+    HAS_REALISTIC = True
+except Exception:
+    HAS_REALISTIC = False
+    _create_realistic_from_dict = None
+
+try:
+    from isaac_sim.scripts.assets.real_human import (
+        RealHuman, RealHumanConfig, HumanType,
+        enable_real_human_extensions, create_real_human,
+        CHARACTER_VARIANTS,
+    )
+    HAS_REAL_HUMAN = True
+except Exception as _e:
+    HAS_REAL_HUMAN = False
+    RealHuman = None
+    enable_real_human_extensions = None
+    create_real_human = None
+    CHARACTER_VARIANTS = []
+
+from isaac_sim.scripts.vehicle.ackermann_controller_ros import drive_step
+from isaac_sim.scripts.testing.wasd_controller import WASDState
+
+
+def verify_spawned_tier(stage, ped) -> str:
+    """Verify the USD stage structure matches the claimed human tier (hard rule 7/8).
+
+    Do NOT trust log messages alone: a REAL S3 human MUST have a SkelRoot
+    descendant with skeleton joints + skinned body meshes under its character
+    prim. Returns a human-readable verdict string; never raises.
+    """
+    try:
+        cname = ped.__class__.__name__
+        if cname != "RealHuman":
+            return f"tier={cname} (no S3 claim; no SkelRoot required)"
+        skel_path = getattr(ped, "_skelroot_path", "") or ""
+        char_path = getattr(ped, "character_prim_path", "") or ""
+        skel_prim = stage.GetPrimAtPath(skel_path) if skel_path else None
+        char_prim = stage.GetPrimAtPath(char_path) if char_path else None
+        has_skel = bool(skel_prim is not None and skel_prim.IsValid())
+        has_char = bool(char_prim is not None and char_prim.IsValid())
+        try:
+            is_skel_valid = bool(ped.is_skelroot_valid()) if hasattr(ped, "is_skelroot_valid") else has_skel
+        except Exception:
+            is_skel_valid = has_skel
+        if has_skel and is_skel_valid:
+            return (f"tier=RealHuman VERIFIED: SkelRoot valid at {skel_path} "
+                    f"(char valid={has_char}); S3 asset structure present")
+        return (f"tier=RealHuman UNVERIFIED: SkelRoot valid={is_skel_valid} "
+                f"(skel_path={skel_path} exists={has_skel}, char={char_path} exists={has_char}) "
+                f"— do NOT report S3 success")
+    except Exception as e:
+        return f"tier verification error (never trust logs alone): {e}"
+
+
+def scenario_needs_s3(scenario: dict) -> bool:
+    """True if any pedestrian (or scenario default) requests the S3 tier.
+
+    Checks the explicit human_tier FIRST, then legacy flags. Both the extension
+    enabling (setup_scenario) and the anim-reopen deferral (run_scenario_file)
+    MUST use this — checking only legacy flags silently skips extension enabling
+    for human_tier:s3 YAMLs, which makes every go_walk_to fail with
+    "No module named 'omni.anim.graph.core'" (found 2026-10-09 via TRACE).
+    """
+    try:
+        if str(scenario.get("human_tier", "")).lower() == "s3":
+            return True
+        if bool(scenario.get("is_real_human", False)):
+            return True
+        for p in scenario.get("pedestrians", []) or []:
+            if str(p.get("human_tier", "")).lower() == "s3":
+                return True
+            if bool(p.get("is_real_human", False) or p.get("use_real_human", False)):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+@dataclass
+class ScenarioResult:
+    """Results from a scenario run."""
+    scenario_name: str
+    success: bool
+    duration: float
+    pedestrian_ground_truths: Dict[str, List[PedestrianGroundTruth]]
+    vehicle_poses: List[Dict]
+    errors: List[str]
+
+
+class ScenarioRunner:
+    """Main scenario runner class."""
+    
+    def __init__(self, headless: bool = True, enable_ros: bool = False, 
+                 gui_mode: bool = False, max_duration: float = 60.0):
+        self.headless = headless
+        self.enable_ros = enable_ros
+        self.gui_mode = gui_mode  # if True, stays open for manual inspection
+        self.max_duration = max_duration
+        self.world = None
+        self.stage = None
+        self.articulation = None
+        self.vehicle_cfg = None
+        self.sim_cfg = None
+        self.dt = 0.01
+        self.pedestrians: List[Pedestrian] = []
+        self.ground_truth_log: Dict[str, List[PedestrianGroundTruth]] = {}
+        self.vehicle_pose_log: List[Dict] = []
+        self.scenario_name = ""
+        self.start_time = 0.0
+        self.wasd = WASDState(max_speed=1.5, max_steer=0.6)
+        self.manual_control = False
+    
+    def initialize_sim(self, defer_for_anim: bool = False, start_pose: tuple = None):
+        """Initialize world using existing global sim.
+
+        Args:
+            defer_for_anim: when True (real-human scenarios), build stage-only
+                (no World, no ROS bridge). The animation save/reopen happens
+                in finalize_setup(), and the single World + bridge are created
+                AFTER the reopen (a pre-reopen World would tick against the
+                invalidated stage and hang).
+            start_pose: optional [x, y, (z), (yaw)] initial spawn pose.
+        """
+        start_xy = (float(start_pose[0]), float(start_pose[1])) if start_pose and len(start_pose) >= 2 else None
+        # Build world with scenario-appropriate settings
+        built = build_world(
+            dynamic=True,
+            with_cameras=True,
+            with_ros=self.enable_ros and not defer_for_anim,
+            start_xy=start_xy,
+            glass_has_collision=True,
+            create_world=not defer_for_anim,
+        )
+        self.world = built["world"]
+        self.stage = built["stage"]
+        self.articulation = built["articulation"]
+        self.vehicle_cfg = built["vehicle_cfg"]
+        self.camera_cfg = built["camera_cfg"]
+        self.sim_cfg = built["sim_cfg"]
+        self.dt = float(self.sim_cfg["physics"]["dt"])
+        self._needs_anim_reopen = False
+
+        if self.world is not None:
+            self.articulation.initialize()
+            self.world.reset()
+        print(f"[INFO] Scenario runner initialized, dt={self.dt} "
+              f"(world={'live' if self.world is not None else 'deferred'})")
+    
+    def load_scenario(self, scenario_path: str) -> dict:
+        """Load scenario from YAML file."""
+        with open(scenario_path, 'r') as f:
+            scenario = yaml.safe_load(f)
+        return scenario
+    
+    def setup_scenario(self, scenario: dict):
+        """Set up scenario: spawn pedestrians, configure vehicle start pose."""
+        self.scenario_name = scenario.get("scenario_name", "unknown")
+        desc = scenario.get("description", "No description provided.")
+        if getattr(args, "goal", None) and len(args.goal) >= 2:
+            yaw = float(args.goal[2]) if len(args.goal) > 2 else 0.0
+            v_dest = [float(args.goal[0]), float(args.goal[1]), yaw]
+        else:
+            v_dest = scenario.get("vehicle_destination_pose", [13.5, -6.0, 0.0])
+
+        if getattr(args, "start", None) and len(args.start) >= 2:
+            if len(args.start) > 2:
+                yaw = float(args.start[2])
+            else:
+                yaw = math.atan2(float(v_dest[1]) - float(args.start[1]), float(v_dest[0]) - float(args.start[0]))
+            v_start = [float(args.start[0]), float(args.start[1]), 0.35, yaw]
+        else:
+            v_start = scenario.get("vehicle_start_pose", [6.0, -6.0, 0.35, 0.0])
+
+        self.vehicle_start = v_start
+        self.vehicle_dest = v_dest
+        peds = scenario.get("pedestrians", []) or []
+        statics = scenario.get("static_obstacles", []) or []
+
+        print(f"\n[SCENARIO SETUP] {self.scenario_name}")
+        print(f"  Description: {desc}")
+        print(f"  Start Pose: ({v_start[0]:.2f}, {v_start[1]:.2f}, z={v_start[2]:.2f}, yaw={v_start[3]:.2f} rad)")
+        print(f"  Destination: ({v_dest[0]:.2f}, {v_dest[1]:.2f}, yaw={v_dest[2]:.2f} rad)")
+        print(f"  Static Obstacles: {len(statics)}")
+        for i, so in enumerate(statics):
+            print(f"    - Obs {i+1}: {so.get('object_id', 'unknown')} ({so.get('object_type', 'object')}) at {so.get('position', [])}")
+        print(f"  Pedestrians: {len(peds)}")
+        for i, po in enumerate(peds):
+            print(f"    - Ped {i+1}: {po.get('pedestrian_id', 'unknown')} ({po.get('type', 'person')}) init={po.get('initial_position', [])} dest={po.get('destination', [])} v={po.get('velocity', 0.0)}m/s")
+
+        # Vehicle motion policy (wall-collision fix, measured contact at t=16s
+        # for the old unconditional 0.5 m/s cruise — see docs/WALL_COLLISION_REPORT.md).
+        #   stationary (default): active zero-velocity hold every step. Safe for
+        #       perception-only scenarios; REQUIRED until a perception-driven
+        #       controller is explicitly enabled (no hidden motion fallback).
+        #   cruise: legacy open-loop 0.5 m/s straight. Explicit opt-in ONLY for
+        #       separately identified route-following tests; NEVER obstacle-aware.
+        self.vehicle_behavior = str(scenario.get("vehicle_behavior", "stationary")).lower()
+        if self.vehicle_behavior not in ("stationary", "cruise"):
+            print(f"  [ERROR] Unknown vehicle_behavior={self.vehicle_behavior!r} — "
+                  f"forcing stationary (safe default)", flush=True)
+            self.vehicle_behavior = "stationary"
+        if self.vehicle_behavior == "cruise":
+            print("  [WARN] vehicle_behavior=cruise: OPEN-LOOP 0.5 m/s straight, "
+                  "no perception, no obstacle stop — route-test use only", flush=True)
+        else:
+            print("  [INFO] vehicle_behavior=stationary: active zero hold (wall-safe default)", flush=True)
+        
+        # Set vehicle start pose
+        vehicle_start = v_start
+        vx, vy, vz, vyaw = vehicle_start
+        
+        # Reposition vehicle: pose goes on /World/Vehicle (the spawn group),
+        # Chassis local stays identity. (Writing the scenario pose into the
+        # Chassis translate used to DOUBLE the build offset — world (12,-12,
+        # 0.70): wall intersection + floating wheels. Fixed 2026-09-24.)
+        vehicle_prim = self.stage.GetPrimAtPath("/World/Vehicle")
+        if vehicle_prim.IsValid():
+            xform = UsdGeom.Xformable(vehicle_prim)
+            for op in xform.GetOrderedXformOps():
+                if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                    op.Set(Gf.Vec3d(vx, vy, vz))
+                elif op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
+                    op.Set(Gf.Vec3d(0, 0, math.degrees(vyaw)))
+            has_rotate = any(op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ
+                           for op in xform.GetOrderedXformOps())
+            if not has_rotate:
+                xform.AddRotateXYZOp().Set(Gf.Vec3d(0, 0, math.degrees(vyaw)))
+        chassis_prim = self.stage.GetPrimAtPath("/World/Vehicle/Chassis")
+        if chassis_prim.IsValid():
+            # Chassis is the physics floating base: local identity so the
+            # Vehicle-group pose is applied exactly once.
+            cxform = UsdGeom.Xformable(chassis_prim)
+            for op in cxform.GetOrderedXformOps():
+                if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                    op.Set(Gf.Vec3d(0.0, 0.0, 0.0))
+                elif op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
+                    op.Set(Gf.Vec3d(0, 0, 0))
+        
+        # Create pedestrians — 3 tiers (labels are contractual, see header):
+        #   Tier 1 (best): is_real_human/use_real_human -> REAL S3 human (SkelRoot skinned mesh, Biped graph)
+        #   Tier 2 (good): is_realistic/variant_idx    -> SEGMENTED primitive assembly (NOT S3, headless-fast)
+        #   Tier 3 (legacy): otherwise                  -> capsule placeholder (kept for regression only)
+        # If Tier 1 is requested but fails, the fallback to Tier 2 is LOUD (ERROR, not WARN)
+        # and the final stage structure is verified by verify_spawned_tier().
+        self.pedestrians = []
+        self.ground_truth_log = {}
+
+        # Enable real human stack if any ped requests it (must be inside SimulationApp).
+        # Uses scenario_needs_s3 (explicit human_tier + legacy flags) — checking
+        # only legacy flags here used to skip extension enabling for human_tier:s3
+        # YAMLs, breaking all walk triggers downstream.
+        needs_real = scenario_needs_s3(scenario)
+        if needs_real and HAS_REAL_HUMAN and enable_real_human_extensions is not None:
+            try:
+                enable_real_human_extensions()
+                print("[INFO] Real human extensions enabled for scenario", self.scenario_name, flush=True)
+            except Exception as e:
+                print(f"[WARN] enable_real_human_extensions failed: {e}", flush=True)
+
+        for ped_config in scenario.get("pedestrians", []):
+            # Explicit tier selection (one mechanism): human_tier per pedestrian,
+            # else scenario-level default, else legacy flags (is_real_human/
+            # use_real_human -> s3; is_realistic/variant_idx -> segmented).
+            tier = str(ped_config.get("human_tier",
+                                      scenario.get("human_tier", ""))).lower() or None
+            is_real_human = bool(ped_config.get("is_real_human", False) or ped_config.get("use_real_human", False))
+            use_realistic = bool(ped_config.get("is_realistic", False) or "variant_idx" in ped_config or scenario.get("is_realistic", False))
+            if tier not in ("s3", "segmented", "capsule"):
+                tier = ("s3" if is_real_human else
+                        "segmented" if use_realistic else "capsule")
+            if tier == "s3":
+                print(f"  [S3-NATIVE] Using RealHuman S3 photoreal human with native OpenUSD skeletal animation (no T-pose).", flush=True)
+            ped = None
+            if tier == "s3":
+                if not (HAS_REAL_HUMAN and create_real_human is not None):
+                    raise RuntimeError(
+                        f"S3 tier requested for {ped_config.get('pedestrian_id')} but "
+                        f"real_human module unavailable (HAS_REAL_HUMAN={HAS_REAL_HUMAN})")
+                try:
+                    ped = create_real_human(self.stage, ped_config)
+                    print(f"  [S3] Spawning actual S3 human: {ped.config.pedestrian_id} "
+                          f"(variant={ped.variant_idx} {ped.label}) at {ped.config.position} yaw={ped.config.yaw_deg}deg")
+                    print(f"  [VERIFY] {verify_spawned_tier(self.stage, ped)}", flush=True)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"S3 tier FAILED for {ped_config.get('pedestrian_id')}: {e} "
+                        f"(NOT falling back to primitives — see docs/S3_TABLE_LABEL_FIX_REPORT.md)") from e
+            if ped is None and tier == "segmented":
+                if not (HAS_REALISTIC and _create_realistic_from_dict is not None):
+                    raise RuntimeError(
+                        f"segmented tier requested for {ped_config.get('pedestrian_id')} but "
+                        f"realistic_pedestrian module unavailable")
+                ped = _create_realistic_from_dict(self.stage, ped_config)
+                ped_type = ped.config.pedestrian_type.value
+                anim = ped_config.get("animation", "walk" if ped_type != "stationary" else "idle")
+                print(f"  [SEGMENTED] Spawning primitive-assembly pedestrian (NOT S3): {ped.config.pedestrian_id} "
+                      f"({ped_type}, anim={anim}, variant={ped_config.get('variant_idx', 'auto')}) at {ped.config.initial_position}")
+            if ped is None:
+                ped = create_pedestrian_from_dict(self.stage, ped_config)
+                print(f"  [CAPSULE] Spawning legacy capsule pedestrian (NOT S3): {ped.config.pedestrian_id} "
+                      f"({ped.config.pedestrian_type.value}) at {ped.config.initial_position}")
+            self.pedestrians.append(ped)
+            # RealHuman uses .config.pedestrian_id, others use .config.pedestrian_id too — unify
+            _pid = getattr(ped.config, "pedestrian_id", str(id(ped)))
+            self.ground_truth_log[_pid] = []
+
+        # Spawn YAML static_obstacles explicitly (previously silently ignored —
+        # audit §5: chair_09/table_10/12-statics never appeared). Uses lab_assets
+        # builders at the exact YAML poses (no repositioning to flatter detection).
+        self.spawn_static_obstacles(scenario)
+
+        # NOTE: no world.reset() and no walk triggers here anymore — see
+        # finalize_setup(): real-human scenarios are exported + reopened first
+        # (AnimationGraph discovery requires characters present at stage
+        # attach), then reset, then triggers.
+        self._needs_anim_reopen = any(
+            ped.__class__.__name__ == "RealHuman" for ped in self.pedestrians
+        )
+        print(f"[INFO] Scenario setup complete: {len(self.pedestrians)} pedestrians "
+              f"(anim_reopen={self._needs_anim_reopen})")
+
+    def spawn_static_obstacles(self, scenario: dict):
+        """Spawn scenario `static_obstacles` at exact YAML poses (audit fix §5).
+
+        Supported object_type: chair | table | column (column has no COCO class
+        and is documented as non-detectable). Unknown types are logged loudly
+        and skipped — never silently dropped. Each object is wrapped in
+        try/except so one bad static cannot fail the scenario. Statics are
+        spawned BEFORE the anim-reopen export so they survive it.
+        """
+        statics = scenario.get("static_obstacles", []) or []
+        if not statics:
+            return
+        try:
+            from isaac_sim.scripts.environments import lab_assets as _la
+        except Exception as e:
+            print(f"  [ERROR] static_obstacles present ({len(statics)}) but lab_assets "
+                  f"unavailable: {e} — statics SKIPPED LOUDLY", flush=True)
+            return
+        self.static_prims = getattr(self, "static_prims", [])
+        try:
+            from isaacsim.core.utils.prims import define_prim as _define
+            _define("/World/ScenarioStatics", "Xform")
+        except Exception:
+            pass
+        for obj in statics:
+            otype = str(obj.get("object_type", "")).lower()
+            oid = str(obj.get("object_id", otype))
+            pos = tuple(obj.get("position", (0.0, 0.0, 0.0)))
+            dims = tuple(obj.get("dimensions", ()))
+            try:
+                if otype == "chair":
+                    _la.create_office_chair(self.stage, f"/World/ScenarioStatics/{oid}", pos)
+                elif otype == "table":
+                    scale = (float(dims[0]), float(dims[1]), float(dims[2])) if len(dims) >= 3 else (1.5, 0.8, 0.75)
+                    _la.create_lab_table(self.stage, f"/World/ScenarioStatics/{oid}", pos, scale=scale)
+                elif otype == "column":
+                    h = float(dims[2]) if len(dims) >= 3 else 3.0
+                    _la.create_slatted_column(self.stage, f"/World/ScenarioStatics/{oid}", pos, height=h)
+                elif otype in ("box", "crate", "unknown", "cube", "obstacle"):
+                    scale = (float(dims[0]), float(dims[1]), float(dims[2])) if len(dims) >= 3 else (0.8, 0.8, 0.8)
+                    from isaacsim.core.utils.prims import define_prim as _def_p
+                    from pxr import UsdGeom, UsdPhysics, Gf, Sdf
+                    prim_p = f"/World/ScenarioStatics/{oid}"
+                    prim = _def_p(prim_p, "Cube")
+                    cg = UsdGeom.Cube(prim)
+                    cg.CreateSizeAttr().Set(1.0)
+                    xf = UsdGeom.Xformable(prim)
+                    xf.AddTranslateOp().Set(Gf.Vec3d(float(pos[0]), float(pos[1]), float(pos[2]) + scale[2]/2.0))
+                    xf.AddScaleOp().Set(Gf.Vec3d(*scale))
+                    disp_attr = prim.GetAttribute("primvars:displayColor")
+                    if not disp_attr:
+                        disp_attr = prim.CreateAttribute("primvars:displayColor", Sdf.ValueTypeNames.Color3fArray)
+                    disp_attr.Set([Gf.Vec3f(0.85, 0.45, 0.15)])  # distinct orange crate
+                    UsdPhysics.CollisionAPI.Apply(prim)
+                else:
+                    print(f"  [ERROR] Unknown static_obstacles object_type={otype!r} id={oid} — SKIPPED LOUDLY", flush=True)
+                    continue
+                self.static_prims.append(oid)
+                print(f"  Created STATIC {otype}: {oid} at {pos} (YAML-exact; column not COCO-detectable)", flush=True)
+            except Exception as e:
+                # lab_assets builders define children before the leaf Xform, so the
+                # trailing define_prim(leaf) can raise "already exists" while the
+                # geometry is fully present — verify instead of failing loudly.
+                if "already exists" in str(e) and self.stage.GetPrimAtPath(
+                        f"/World/ScenarioStatics/{oid}").IsValid():
+                    self.static_prims.append(oid)
+                    print(f"  Created STATIC {otype}: {oid} at {pos} (builder-internal scope race, geometry verified)", flush=True)
+                else:
+                    print(f"  [ERROR] STATIC spawn FAILED {otype} {oid} at {pos}: {e} — skipped, scenario continues", flush=True)
+
+    def reposition_vehicle(self, rx: float, ry: float, ryaw: float, rz: float = 0.35):
+        """Reposition physical vehicle articulation to world (rx, ry, rz, ryaw) and zero velocities."""
+        print(f"[SIM RESET] Repositioning vehicle articulation to ({rx:.2f}, {ry:.2f}, z={rz:.2f}, yaw={math.degrees(ryaw):.1f} deg)", flush=True)
+        vehicle_prim = self.stage.GetPrimAtPath("/World/Vehicle")
+        if vehicle_prim.IsValid():
+            xform = UsdGeom.Xformable(vehicle_prim)
+            for op in xform.GetOrderedXformOps():
+                if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                    op.Set(Gf.Vec3d(float(rx), float(ry), float(rz)))
+                elif op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
+                    op.Set(Gf.Vec3d(0.0, 0.0, math.degrees(ryaw)))
+            has_rotate = any(op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ
+                           for op in xform.GetOrderedXformOps())
+            if not has_rotate:
+                xform.AddRotateXYZOp().Set(Gf.Vec3d(0.0, 0.0, math.degrees(ryaw)))
+
+        chassis_prim = self.stage.GetPrimAtPath("/World/Vehicle/Chassis")
+        if chassis_prim.IsValid():
+            cxform = UsdGeom.Xformable(chassis_prim)
+            for op in cxform.GetOrderedXformOps():
+                if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                    op.Set(Gf.Vec3d(0.0, 0.0, 0.0))
+                elif op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
+                    op.Set(Gf.Vec3d(0.0, 0.0, 0.0))
+
+        if self.articulation is not None:
+            try:
+                qw = math.cos(ryaw / 2.0)
+                qz = math.sin(ryaw / 2.0)
+                pos_arr = np.array([[float(rx), float(ry), float(rz)]], dtype=np.float32)
+                rot_arr = np.array([[qw, 0.0, 0.0, qz]], dtype=np.float32)
+
+                # Set default state in Isaac Sim 6.2 PhysX so world resets don't revert to old pose
+                self.articulation.set_default_state(positions=pos_arr, orientations=rot_arr)
+                # Apply world pose to active articulation root
+                self.articulation.set_world_poses(positions=pos_arr, orientations=rot_arr)
+                # Reset linear and angular velocities
+                self.articulation.set_linear_velocities(np.zeros((1, 3), dtype=np.float32))
+                self.articulation.set_angular_velocities(np.zeros((1, 3), dtype=np.float32))
+                # Reset steering joint positions and targets, wheel angular velocities
+                num_dofs = self.articulation.num_dof
+                self.articulation.set_joint_positions(np.zeros((1, num_dofs), dtype=np.float32))
+                self.articulation.set_joint_velocities(np.zeros((1, num_dofs), dtype=np.float32))
+                self.articulation.set_joint_position_targets(np.zeros((1, num_dofs), dtype=np.float32))
+                self.articulation.set_joint_velocity_targets(np.zeros((1, num_dofs), dtype=np.float32))
+
+                actual_pos, actual_rot = self.articulation.get_world_poses()
+                print(f"[SIM RESET VERIFIED] Articulation actual world pose: {actual_pos[0]}, rot: {actual_rot[0]}", flush=True)
+            except Exception as e:
+                print(f"[SIM RESET ERROR] Failed to set articulation pose: {e}", flush=True)
+        for ped in self.pedestrians:
+            try:
+                if hasattr(ped, "reset"):
+                    ped.reset()
+            except Exception:
+                pass
+
+    def switch_scenario(self, scen_idx: int):
+        """Dynamically switch scenario without restarting simulation app."""
+        try:
+            from isaac_sim.scripts.scenarios.scenario_registry import get_scenario_by_index
+            scen_meta = get_scenario_by_index(scen_idx)
+            scen_file = scen_meta["path"]
+            print(f"\n{'='*70}\n[SIM SWITCH] Switching to Scenario {scen_idx + 1}/13: {scen_meta['name']}\n  {scen_meta['description']}\n{'='*70}", flush=True)
+        except Exception as e:
+            print(f"[SIM SWITCH] Invalid scenario index {scen_idx}: {e}", flush=True)
+            return
+
+        if self.stage.GetPrimAtPath("/World/ScenarioStatics").IsValid():
+            self.stage.RemovePrim("/World/ScenarioStatics")
+        if self.stage.GetPrimAtPath("/World/Characters").IsValid():
+            self.stage.RemovePrim("/World/Characters")
+        if self.stage.GetPrimAtPath("/World/Pedestrians").IsValid():
+            self.stage.RemovePrim("/World/Pedestrians")
+        self.pedestrians = []
+        self.ground_truth_log = {}
+        self.static_prims = []
+
+        try:
+            with open(scen_file, "r") as f:
+                new_scen = yaml.safe_load(f)
+            self.setup_scenario(new_scen)
+            v_start = new_scen.get("vehicle_start_pose", [6.0, -6.0, 0.35, 0.0])
+            self.reposition_vehicle(v_start[0], v_start[1], v_start[3])
+
+            # Trigger walking for any active pedestrians without reloading stage or recreating World
+            for ped in self.pedestrians:
+                if ped.__class__.__name__ == "RealHuman":
+                    try:
+                        from isaac_sim.scripts.assets.real_human import HumanType as _HT
+                        is_walking = ped.config.human_type == _HT.WALKING
+                        if is_walking:
+                            if ped.config.destination:
+                                ped.go_walk_to(ped.config.destination)
+                            else:
+                                ped.go_walk_straight(velocity=ped.config.velocity, distance=8.0)
+                            ped.update(0.01)
+                    except Exception as e:
+                        print(f"  [WARN] RealHuman walk trigger failed {ped.config.pedestrian_id}: {e}", flush=True)
+                elif hasattr(ped, "reset"):
+                    try:
+                        ped.reset()
+                    except Exception:
+                        pass
+
+            print(f"[SIM SWITCH] Successfully switched in-process to {new_scen.get('scenario_name')}: "
+                  f"obstacles={len(self.static_prims)} pedestrians={len(self.pedestrians)}", flush=True)
+        except Exception as e:
+            print(f"[SIM SWITCH] Failed to switch scenario: {e}", flush=True)
+
+    def finalize_setup(self):
+        """Reset physics and trigger walks, reopening the stage first if needed.
+
+        Real-human path: export the built stage (lab + vehicle + wired S3
+        humans, nothing rebuilt) and reopen it so the AnimationGraph runtime
+        discovers the characters; then re-create World/Articulation wrappers
+        on the reopened stage, reset, (re)build the ROS bridge, refresh human
+        handles, and trigger graph walks. Non-human scenarios keep the exact
+        legacy flow (reset only).
+        """
+        if self._needs_anim_reopen:
+            from isaac_sim.scripts.assets.real_human import (
+                save_and_reopen_stage_for_animation,
+            )
+            print("[INFO] Exporting + reopening stage for AnimationGraph discovery...",
+                  flush=True)
+            want = []
+            for ped in self.pedestrians:
+                if ped.__class__.__name__ == "RealHuman":
+                    want.append(getattr(ped, "character_prim_path", ""))
+                    want.append(getattr(ped, "_skelroot_path", ""))
+            new_stage = save_and_reopen_stage_for_animation(self.stage, expected_paths=want)
+            self.stage = new_stage
+            # Create the single World on the reopened stage. The pre-reopen
+            # articulation object is bound to the detached stage and must NOT
+            # be reused (it poisons init); construct fresh on identical paths.
+            # Order matches build_world: scene.add -> reset (creates the
+            # physics simulation view) -> articulation.initialize().
+            self.world = World(
+                stage_units_in_meters=1.0,
+                physics_dt=float(self.sim_cfg["physics"]["dt"]),
+                rendering_dt=float(self.sim_cfg["physics"]["dt"]),
+            )
+            self.articulation = Articulation("/World/Vehicle/Chassis")
+            self.world.scene.add(self.articulation)
+            print("[ANIM-REOPEN] world created, resetting physics...", flush=True)
+            self.world.reset()
+            print("[ANIM-REOPEN] reset done, initializing articulation...", flush=True)
+            self.articulation.initialize()
+            print("[INFO] Reopened stage reset complete.", flush=True)
+            if hasattr(self, "vehicle_start"):
+                v_start = self.vehicle_start
+                self.reposition_vehicle(v_start[0], v_start[1], v_start[3], rz=v_start[2])
+            for ped in self.pedestrians:
+                if ped.__class__.__name__ == "RealHuman":
+                    ped.refresh_after_reopen(new_stage)
+            # Timeline MUST be playing or AnimationGraph MotionMatching never
+            # advances (world.step moves physics but graph characters freeze:
+            # triggers ok, zero displacement — found 2026-09-25).
+            try:
+                import omni.timeline as _otl
+                _tl = _otl.get_timeline_interface()
+                _tl.set_looping(True)
+                _tl.play()
+            except Exception:
+                pass
+        else:
+            self.world.reset()
+            if self.articulation is not None:
+                try:
+                    self.articulation.initialize()
+                except Exception:
+                    pass
+            if hasattr(self, "vehicle_start"):
+                v_start = self.vehicle_start
+                self.reposition_vehicle(v_start[0], v_start[1], v_start[3], rz=v_start[2])
+            try:
+                import omni.timeline as _otl
+                _tl = _otl.get_timeline_interface()
+                _tl.set_looping(True)
+                _tl.play()
+            except Exception:
+                pass
+
+        if self.enable_ros:
+            from isaac_sim.scripts.bridge.ros2_bridge import setup_ros2_bridge
+            setup_ros2_bridge(RGBD_CAMERA_PRIM, self.camera_cfg,
+                              self.sim_cfg, vehicle_path="/World/Vehicle")
+
+        # Trigger walking for RealHuman S3 humans (requires runtime after reset for graph handle)
+        for ped in self.pedestrians:
+            if ped.__class__.__name__ == "RealHuman":
+                try:
+                    from isaac_sim.scripts.assets.real_human import HumanType as _HT
+                    is_walking = ped.config.human_type == _HT.WALKING
+                    if is_walking:
+                        if ped.config.destination:
+                            ok = ped.go_walk_to(ped.config.destination)
+                            print(f"  -> RealHuman GRAPH walk triggered: {ped.config.pedestrian_id} to {ped.config.destination} ok={ok}", flush=True)
+                        else:
+                            ok = ped.go_walk_straight(velocity=ped.config.velocity, distance=8.0)
+                            print(f"  -> RealHuman GRAPH walk straight triggered: {ped.config.pedestrian_id} v={ped.config.velocity} ok={ok}", flush=True)
+                        if not ok:
+                            print(f"  [FAIL] RealHuman walk trigger FAILED (no runtime Character, no fallback): {ped.config.pedestrian_id}", flush=True)
+                        # prime graph walk blend for first step
+                        ped.update(0.01)
+                except Exception as e:
+                    print(f"  [WARN] RealHuman walk trigger failed {ped.config.pedestrian_id}: {e}", flush=True)
+    
+    def step_pedestrians(self, dt: float, sim_time: float):
+        """Update all pedestrians (capsule, segmented, and S3 real humans)."""
+        # Opt-in motion trace (default OFF, zero behavior change): with
+        # SKATEBOARD_TRACE_PEDS=1, root positions print every ~2 sim-s so GUI
+        # observers can verify trajectories independently of rendering.
+        import os as _os
+        _trace = _os.environ.get("SKATEBOARD_TRACE_PEDS", "") == "1"
+        for ped in self.pedestrians:
+            # RealHuman has update(dt) only; capsule/segmented have update(dt, sim_time)
+            is_real_human = ped.__class__.__name__ == "RealHuman"
+            try:
+                if is_real_human:
+                    # S3 real human — graph walk pump (Walk ramp + nav update).
+                    # No fallback exists: without a runtime Character this is
+                    # a no-op and triggers report ok=False (honest failure).
+                    ped.update(dt)
+                    # Log GT for evaluation (real humans also logged, but flagged real_human=true)
+                    # RealHuman has no PedestrianGroundTruth; synthesize from world pos
+                    pos = ped.get_world_pos()
+                    from isaac_sim.scripts.assets.pedestrian import PedestrianGroundTruth as _PGT
+                    _pid = getattr(ped.config, "pedestrian_id", str(id(ped)))
+                    gt = _PGT(pedestrian_id=_pid, timestamp=sim_time, position=pos,
+                               orientation=math.radians(ped.config.yaw_deg), velocity=(0,0,0),
+                               pedestrian_type="real_human", dimensions=(0.5,0.5,1.75))
+                else:
+                    if ped.is_active() or getattr(ped.state, "value", "") == "idle":
+                        ped.update(dt, sim_time)
+                    else:
+                        # stationary that started idle but already marked idle — still tick once
+                        try: ped.update(dt, sim_time)
+                        except Exception: pass
+                    gt = ped.get_ground_truth()
+                    _pid = ped.config.pedestrian_id
+            except Exception as e:
+                # Don't crash the scenario if one ped update fails
+                print(f"[WARN] ped update failed {ped}: {e}", flush=True)
+                continue
+            self.ground_truth_log[_pid].append(gt)
+            # Regular pedestrian position diagnostics (Rule 9 requirement)
+            try:
+                _tick = int(round(sim_time / self.dt))
+                if _tick % int(round(2.0 / self.dt)) == 0:
+                    _pp = gt.position if hasattr(gt, "position") else ("?", "?", "?")
+                    print(f"  [PED DIAGNOSTIC] t={sim_time:.1f}s {_pid} pos="
+                          f"({float(_pp[0]):.2f}, {float(_pp[1]):.2f}, {float(_pp[2]):.2f})", flush=True)
+            except Exception:
+                pass
+    
+    def log_vehicle_pose(self, sim_time: float):
+        """Log vehicle pose for analysis."""
+        chassis_prim = self.stage.GetPrimAtPath("/World/Vehicle/Chassis")
+        if chassis_prim.IsValid():
+            m = UsdGeom.Xformable(chassis_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            p = m.Transform(Gf.Vec3d(0, 0, 0))
+            fwd = m.TransformDir(Gf.Vec3d(1, 0, 0))
+            yaw = math.atan2(fwd[1], fwd[0])
+            
+            self.vehicle_pose_log.append({
+                "timestamp": sim_time,
+                "x": float(p[0]),
+                "y": float(p[1]),
+                "z": float(p[2]),
+                "yaw": float(yaw)
+            })
+    
+    def run_scenario(self, scenario: dict, use_wasd: bool = False) -> ScenarioResult:
+        """Run a single scenario."""
+        self.setup_scenario(scenario)
+        self.finalize_setup()
+        
+        # Get DOF indices for drive_step
+        names = list(self.articulation.dof_names)
+        idx = {n: names.index(n) for n in names}
+        drive_pos = {}
+        
+        # Subscribe to keyboard input for manual WASD driving if requested
+        kbd_iface = kbd = kbd_sub = None
+        if use_wasd:
+            try:
+                from isaac_sim.scripts.testing.wasd_controller import subscribe_wasd
+                kbd_iface, kbd, kbd_sub = subscribe_wasd(self.wasd)
+                self.manual_control = True
+                print("[WASD] Keyboard subscription ACTIVE on simulation viewport.", flush=True)
+                print("[WASD] Controls: W=forward, S=reverse, A=steer left, D=steer right, Space=brake, R=center", flush=True)
+            except Exception as e:
+                print(f"[WASD] Warning: carb.input keyboard subscribe failed: {e}; stdin fallback available", flush=True)
+
+        # Zero-latency command receiver for autonomous navigation
+        cmd_sock = None
+        enc_sock = None
+        last_cmd_t = 0.0
+        ros_steer = 0.0
+        ros_speed = 0.0
+        if self.enable_ros:
+            try:
+                import socket
+                cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                except AttributeError:
+                    pass
+                if not use_wasd:
+                    cmd_sock.bind(("127.0.0.1", 9876))
+                    cmd_sock.setblocking(False)
+                    print("[ROS-CMD] Bound UDP socket on 127.0.0.1:9876 for autonomous vehicle driving.", flush=True)
+                enc_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            except Exception as e:
+                print(f"[ROS-CMD] Warning: UDP bind failed: {e}", flush=True)
+                cmd_sock = None
+                enc_sock = None
+
+        max_steps = int(self.max_duration / self.dt)
+        sim_time = 0.0
+        frame = 0
+        
+        print(f"[INFO] Running scenario for up to {self.max_duration}s ({max_steps} steps)", flush=True)
+        
+        try:
+            while sim.is_running() and (self.gui_mode or frame < max_steps):
+                # Handle manual WASD input if enabled
+                if use_wasd:
+                    # Non-blocking terminal stdin fallback in case viewport loses focus
+                    try:
+                        import select
+                        if select.select([sys.stdin], [], [], 0.0)[0]:
+                            ch = sys.stdin.read(1)
+                            if ch and ch.strip():
+                                self.wasd.handle_key(ch.strip())
+                    except Exception:
+                        pass
+                    
+                    omega = float(self.wasd.speed) / float(self.vehicle_cfg["wheel_radius"])
+                    drive_step(self.articulation, idx, float(self.wasd.steer), omega, self.dt, drive_pos)
+                
+                # Motion policy: if ROS bridge is active and not manual WASD,
+                # receive steering and speed from autonomous planner.
+                # Otherwise, stationary default (active hold) unless explicitly configured.
+                elif not self.manual_control:
+                    steer_cmd = 0.0
+                    speed_cmd = 0.0
+                    if cmd_sock is not None:
+                        import struct
+                        try:
+                            while True:
+                                data, _ = cmd_sock.recvfrom(64)
+                                if len(data) == 8:
+                                    r_steer, r_speed = struct.unpack("ff", data)
+                                    if math.isfinite(r_steer) and math.isfinite(r_speed):
+                                        ros_steer = float(r_steer)
+                                        ros_speed = float(r_speed)
+                                        last_cmd_t = time.time()
+                                        if frame % int(0.5 / self.dt) == 0:
+                                            print(f"[RECV 9876] steer={ros_steer:.2f} speed={ros_speed:.2f}", flush=True)
+                                elif len(data) == 16:
+                                    cmd_type, rx, ry, ryaw = struct.unpack("ffff", data)
+                                    if cmd_type == -999.0:
+                                        self.reposition_vehicle(rx, ry, ryaw)
+                                        ros_steer, ros_speed = 0.0, 0.0
+                                        last_cmd_t = time.time()
+                                    elif cmd_type == -888.0:
+                                        self.switch_scenario(int(rx))
+                                        ros_steer, ros_speed = 0.0, 0.0
+                                        last_cmd_t = time.time()
+                        except BlockingIOError:
+                            pass
+                        except Exception as e:
+                            print(f"[RECV 9876 EXCEPTION] {e}", flush=True)
+                        if time.time() - last_cmd_t < 0.5:
+                            steer_cmd = ros_steer
+                            speed_cmd = ros_speed
+                    elif getattr(self, "vehicle_behavior", "stationary") == "cruise":
+                        speed_cmd = 0.5
+                    
+                    max_steer = float(self.vehicle_cfg.get("max_steering_angle", 0.6))
+                    max_speed = float(self.vehicle_cfg.get("max_speed", 2.0))
+                    steer_cmd = max(-max_steer, min(max_steer, steer_cmd))
+                    speed_cmd = max(-max_speed, min(max_speed, speed_cmd))
+                    omega = speed_cmd / float(self.vehicle_cfg["wheel_radius"])
+                    if self.enable_ros and frame % int(1.0 / self.dt) == 0:
+                        print(f"[SIM ROS CMD] steer={steer_cmd:.2f} speed={speed_cmd:.2f} omega={omega:.2f}", flush=True)
+                    drive_step(self.articulation, idx, steer_cmd, omega, self.dt, drive_pos)
+                
+                # Legitimate closed-loop wheel encoder feedback to odometry node (Rule 8 compliant)
+                if self.enable_ros and enc_sock is not None:
+                    try:
+                        import struct
+                        j_vels = np.asarray(self.articulation.get_joint_velocities()).flatten()
+                        j_pos = np.asarray(self.articulation.get_joint_positions()).flatten()
+                        w_rl = float(j_vels[idx["Joint_RL"]]) if "Joint_RL" in idx else omega
+                        w_rr = float(j_vels[idx["Joint_RR"]]) if "Joint_RR" in idx else omega
+                        # Reject unloaded wheel spin during aggressive cornering
+                        if abs(w_rl - w_rr) > 0.8:
+                            w_drive = min(abs(w_rl), abs(w_rr)) * (1.0 if (w_rl + w_rr) >= 0 else -1.0)
+                        else:
+                            w_drive = 0.5 * (w_rl + w_rr)
+                        wheel_r = float(self.vehicle_cfg.get("wheel_radius", 0.25)) * 0.915  # Calibrated effective loaded rolling radius under PhysX tire scrub
+                        v_actual = w_drive * wheel_r
+                        s_fl = float(j_pos[idx["Joint_Steer_FL"]]) if "Joint_Steer_FL" in idx else steer_cmd
+                        s_fr = float(j_pos[idx["Joint_Steer_FR"]]) if "Joint_Steer_FR" in idx else steer_cmd
+                        s_actual = 0.5 * (s_fl + s_fr)
+                        enc_sock.sendto(struct.pack("ff", float(v_actual), float(s_actual)), ("127.0.0.1", 9878))
+                        # Send ground-truth vehicle pose on port 9879 for offline evaluation / visualizer
+                        positions, orientations = self.articulation.get_world_poses()
+                        gt_pos = positions[0]
+                        gt_rot = orientations[0]
+                        qw, qx, qy, qz = float(gt_rot[0]), float(gt_rot[1]), float(gt_rot[2]), float(gt_rot[3])
+                        siny_cosp = 2.0 * (qw * qz + qx * qy)
+                        cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+                        gt_yaw = math.atan2(siny_cosp, cosy_cosp)
+                        enc_sock.sendto(struct.pack("fff", float(gt_pos[0]), float(gt_pos[1]), float(gt_yaw)), ("127.0.0.1", 9879))
+                        if frame % 100 == 0:
+                            print(f"[SIM ODOM TELEM] idx_keys={list(idx.keys())} w_rl={w_rl:.2f} w_rr={w_rr:.2f} v_act={v_actual:.2f} gt_x={gt_pos[0]:.2f} gt_y={gt_pos[1]:.2f}", flush=True)
+                    except Exception as _e:
+                        if frame == 0 or frame % 200 == 0:
+                            print(f"[WARN] Encoder feedback send error: {_e}", flush=True)
+                
+                # Step pedestrians
+                self.step_pedestrians(self.dt, sim_time)
+                
+                # Step simulation (ROS bridge needs rendered frames even
+                # headless — same rule as run_fidelity_world --ros2 — AND
+                # real-human AnimationGraphs advance ONLY on rendered frames:
+                # render=False moves physics but freezes graph characters
+                # (probe 2026-09-25), so force render with anim reopen too.
+                self.world.step(render=(not self.headless) or self.enable_ros
+                                or self._needs_anim_reopen)
+                
+                # Log data
+                self.log_vehicle_pose(sim_time)
+                
+                sim_time += self.dt
+                frame += 1
+                
+                # Check if all pedestrians completed (only break early in non-ROS standalone pedestrian tests)
+                if not self.enable_ros and all(p.is_completed() for p in self.pedestrians):
+                    print(f"[INFO] All pedestrians completed at t={sim_time:.1f}s", flush=True)
+                    # Continue for a bit to let vehicle pass
+                    if sim_time > 10.0:
+                        break
+                
+                # Periodic logging
+                if frame % int(2.0 / self.dt) == 0:
+                    active_count = sum(1 for p in self.pedestrians if p.is_active())
+                    pos_str = ""
+                    if self.vehicle_pose_log:
+                        last_p = self.vehicle_pose_log[-1]
+                        pos_str = f" | vehicle x={last_p['x']:.2f} y={last_p['y']:.2f} yaw={math.degrees(last_p['yaw']):.1f}°"
+                    wasd_str = f" | {self.wasd}" if use_wasd else ""
+                    print(f"  t={sim_time:.1f}s: {active_count}/{len(self.pedestrians)} pedestrians active{wasd_str}{pos_str}", flush=True)
+        
+        except KeyboardInterrupt:
+            print("[INFO] Scenario interrupted by user", flush=True)
+        except Exception as e:
+            print(f"[ERROR] Scenario failed: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return ScenarioResult(
+                scenario_name=self.scenario_name,
+                success=False,
+                duration=sim_time,
+                pedestrian_ground_truths=self.ground_truth_log,
+                vehicle_poses=self.vehicle_pose_log,
+                errors=[str(e)]
+            )
+        
+
+
+        if cmd_sock is not None:
+            try:
+                cmd_sock.close()
+            except Exception:
+                pass
+
+        if kbd_iface is not None and kbd is not None and kbd_sub is not None:
+            try:
+                kbd_iface.unsubscribe_to_keyboard_events(kbd, kbd_sub)
+            except Exception:
+                pass
+        
+        return ScenarioResult(
+            scenario_name=self.scenario_name,
+            success=True,
+            duration=sim_time,
+            pedestrian_ground_truths=self.ground_truth_log,
+            vehicle_poses=self.vehicle_pose_log,
+            errors=[]
+        )
+    
+    def cleanup(self):
+        """Clean up simulation."""
+        if sim:
+            try:
+                sim.close()
+            except Exception:
+                pass
+
+
+def run_scenario_file(scenario_path: str, headless: bool = True,
+                      enable_ros: bool = False, gui_mode: bool = False,
+                      max_duration: float = 60.0, use_wasd: bool = False) -> ScenarioResult:
+    """Convenience function to run a scenario from file."""
+    runner = ScenarioRunner(headless=headless, enable_ros=enable_ros,
+                           gui_mode=gui_mode, max_duration=max_duration)
+    try:
+        # Load first: real-human scenarios defer World + ROS bridge until
+        # after the animation save/reopen (bridge graph must live in the
+        # reopened stage; a pre-reopen World would hang on the old stage).
+        scenario = runner.load_scenario(scenario_path)
+        if getattr(args, "goal", None) and len(args.goal) >= 2:
+            yaw = float(args.goal[2]) if len(args.goal) > 2 else 0.0
+            v_dest = [float(args.goal[0]), float(args.goal[1]), yaw]
+        else:
+            v_dest = scenario.get("vehicle_destination_pose", [13.5, -6.0, 0.0])
+
+        if getattr(args, "start", None) and len(args.start) >= 2:
+            if len(args.start) > 2:
+                yaw = float(args.start[2])
+            else:
+                yaw = math.atan2(float(v_dest[1]) - float(args.start[1]), float(v_dest[0]) - float(args.start[0]))
+            v_start = [float(args.start[0]), float(args.start[1]), 0.35, yaw]
+        else:
+            v_start = scenario.get("vehicle_start_pose", [6.0, -6.0, 0.35, 0.0])
+
+        runner.initialize_sim(defer_for_anim=scenario_needs_s3(scenario), start_pose=v_start)
+        return runner.run_scenario(scenario, use_wasd=use_wasd)
+    except Exception as e:
+        print(f"[FATAL ERROR in run_scenario_file]: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        runner.cleanup()
+
+
+def run_all_scenarios(scenarios_dir: str = "configs/scenarios", 
+                      headless: bool = True, max_duration: float = 30.0) -> List[ScenarioResult]:
+    """Run all scenario YAML files in directory."""
+    results = []
+    scenario_files = sorted(Path(scenarios_dir).glob("scenario_*.yaml"))
+    
+    print(f"[INFO] Found {len(scenario_files)} scenarios to run")
+    
+    for scenario_file in scenario_files:
+        print(f"\n{'='*60}")
+        print(f"Running: {scenario_file.name}")
+        print(f"{'='*60}")
+        
+        runner = ScenarioRunner(headless=headless, max_duration=max_duration)
+        try:
+            scenario = runner.load_scenario(str(scenario_file))
+            v_start = scenario.get("vehicle_start_pose", [6.0, -6.0, 0.35, 0.0])
+            runner.initialize_sim(start_pose=v_start)
+            result = runner.run_scenario(scenario)
+            results.append(result)
+            
+            status = "PASS" if result.success else "FAIL"
+            print(f"[{status}] {scenario_file.name} - duration: {result.duration:.1f}s")
+            if result.errors:
+                for err in result.errors:
+                    print(f"  ERROR: {err}")
+        finally:
+            runner.cleanup()
+        
+        # Brief pause between scenarios
+        time.sleep(1.0)
+    
+    return results
+
+
+print(f"[SCRIPT END] About to check __name__ == '__main__', __name__ = {__name__}", flush=True)
+
+print(f"[SCRIPT MAIN CHECK] __name__ = {__name__}, about to enter main block", flush=True)
+
+if __name__ == "__main__":
+    scenario_arg = args.scenario_opt or args.scenario
+    print(f"[DEBUG] __name__ = {__name__}", flush=True)
+    print(f"[DEBUG] scenario_arg = {scenario_arg}", flush=True)
+    print(f"[DEBUG] args.all = {args.all}", flush=True)
+    print(f"[DEBUG] args.headless = {args.headless}", flush=True)
+    print(f"[DEBUG] args.gui = {args.gui}", flush=True)
+    
+    if args.all:
+        print(f"[DEBUG] Running all scenarios", flush=True)
+        results = run_all_scenarios(headless=args.headless, max_duration=args.duration)
+        print(f"\n{'='*60}")
+        print(f"SUMMARY: {len(results)} scenarios run")
+        for r in results:
+            status = "PASS" if r.success else "FAIL"
+            print(f"  [{status}] {r.scenario_name} ({r.duration:.1f}s)")
+    elif scenario_arg:
+        from isaac_sim.scripts.scenarios.scenario_registry import resolve_scenario
+        try:
+            scen_info = resolve_scenario(scenario_arg)
+        except Exception as e:
+            print(f"[ERROR] Failed to resolve scenario {scenario_arg!r}: {e}", flush=True)
+            sys.exit(1)
+        print(f"\n{'='*70}\n[SCENARIO LAUNCH] ID={scen_info['id'].upper()} - {scen_info['name']}\n  Description: {scen_info['description']}\n  YAML: {scen_info['path']}\n{'='*70}\n", flush=True)
+        result = run_scenario_file(
+            scen_info["path"], headless=args.headless, enable_ros=args.ros,
+            gui_mode=args.gui, max_duration=args.duration, use_wasd=args.wasd
+        )
+        print(f"[DEBUG] run_scenario_file returned, success={result.success}", flush=True)
+        status = "PASS" if result.success else "FAIL"
+        print(f"\n[{status}] {result.scenario_name} - duration: {result.duration:.1f}s", flush=True)
+        sys.exit(0 if result.success else 1)
+    else:
+        parser.print_help()
+        print("\nExample usage:")
+        print("  # Run single scenario headless")
+        print("  python scenario_runner.py configs/scenarios/scenario_01_stationary_person.yaml --headless")
+        print("  # Run single scenario with GUI for inspection")
+        print("  python scenario_runner.py configs/scenarios/scenario_01_stationary_person.yaml --gui")
+        print("  # Run all scenarios headless")
+        print("  python scenario_runner.py --all --headless")

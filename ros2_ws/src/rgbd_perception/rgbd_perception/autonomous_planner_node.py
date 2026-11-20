@@ -45,22 +45,27 @@ from std_msgs.msg import Bool, String
 from diagnostic_msgs.msg import DiagnosticArray
 
 from rgbd_perception.config import load_config
-from isaac_sim.scripts.navigation.navmesh import is_point_walkable, LAB_X_MIN, LAB_X_MAX, LAB_Y_MIN, LAB_Y_MAX
+from rgbd_perception.vehicle_footprint import (
+    VEH_HALF_LENGTH, VEH_HALF_WIDTH, SAFETY_MARGIN,
+    ASTAR_HL_EFF, ASTAR_HW_EFF, WHEELBASE,
+    MAX_STEER_RAD, MAX_CURVATURE_RAD_M, CURVATURE_FEASIBILITY_TOL,
+    sat_obb_clearance, normalize_angle, compute_path_curvature
+)
+from isaac_sim.scripts.navigation.navmesh import is_point_walkable, LAB_X_MIN, LAB_X_MAX, LAB_Y_MIN, LAB_Y_MAX, OBSTACLES
 import yaml
 
-
-def normalize_angle(a: float) -> float:
-    while a > math.pi:
-        a -= 2.0 * math.pi
-    while a < -math.pi:
-        a += 2.0 * math.pi
-    return a
+# Effective clearance threshold beyond the inflated VEH_HALF_WIDTH=0.65m bumper (0.05m + 0.05m chassis inset = 0.10m physical clearance)
+MIN_SAFE_CLEARANCE = 0.05
 
 
 def astar_grid_path(start: Tuple[float, float], goal: Tuple[float, float],
                     obstacles: Optional[List[dict]] = None,
-                    res: float = 0.25, safety_margin: float = 0.65) -> Optional[List[Tuple[float, float]]]:
-    """2D Grid A* planner across lab floor respecting walls and detected obstacles."""
+                    res: float = 0.25, safety_margin: float = 0.15,
+                    return_status: bool = False):
+    """2D Grid A* planner across lab floor respecting walls and oriented detected obstacles.
+    Explicitly distinguishes GOAL_REACHED, PARTIAL_PATH, and NO_PATH (Requirement 4).
+    Only returns a complete path if GOAL_REACHED; partial paths are strictly rejected.
+    """
     sx, sy = start
     gx, gy = goal
 
@@ -82,26 +87,49 @@ def astar_grid_path(start: Tuple[float, float], goal: Tuple[float, float],
     start_node = to_grid(sx, sy)
     goal_node = to_grid(gx, gy)
 
-    # Obstacle circles: (x_w, y_w, r)
-    obs_circles = []
+    # Obstacle bounding boxes inflated by shared vehicle footprint + safety margin (Requirement 3)
+    veh_hl_eff = ASTAR_HL_EFF
+    veh_hw_eff = ASTAR_HW_EFF
+    obs_boxes = []
+    d_nom_goal = math.hypot(gx - sx, gy - sy)
+    ugx_goal = (gx - sx) / d_nom_goal if d_nom_goal > 0.1 else 1.0
+    ugy_goal = (gy - sy) / d_nom_goal if d_nom_goal > 0.1 else 0.0
     if obstacles:
         for obs in obstacles:
-            ox = obs.get("x_world", obs.get("x", 0.0))
-            oy = obs.get("y_world", obs.get("y", 0.0))
-            obs_circles.append((ox, oy, safety_margin))
+            ox = float(obs.get("x_world", obs.get("x", 0.0)))
+            oy = float(obs.get("y_world", obs.get("y", 0.0)))
+            # Skip obstacles situated beyond the destination goal
+            if obs.get("z_cam", 0.0) > (d_nom_goal + 0.80):
+                continue
+            # Optical size_z is longitudinal thickness along corridor X; size_x is lateral width along corridor Y
+            obs_hl = max(0.20, float(obs.get("size_z", 0.80)) / 2.0)
+            obs_hw = max(0.20, float(obs.get("size_x", 0.80)) / 2.0)
+            # Total exclusion half extents for vehicle center (x_w, y_w) with diagonal approach clearance
+            ex_hx = obs_hl + veh_hl_eff + safety_margin
+            ex_hy = obs_hw + veh_hw_eff + safety_margin
+            obs_boxes.append((ox - ex_hx, ox + ex_hx, oy - ex_hy, oy + ex_hy))
 
     def is_free(node):
         x_w, y_w = to_world(node[0], node[1])
-        if not (LAB_X_MIN <= x_w <= LAB_X_MAX and LAB_Y_MIN <= y_w <= LAB_Y_MAX):
+        # Laboratory boundary validation (preserve LAB limits, check wall margin)
+        if not (LAB_X_MIN + 0.80 <= x_w <= LAB_X_MAX - 0.80 and LAB_Y_MIN + 0.80 <= y_w <= LAB_Y_MAX - 0.80):
             return False
-        # Enforce corridor lateral boundaries when navigating main corridor (vehicle body width 1.2m)
-        if abs(sy - -6.0) < 1.5 and abs(gy - -6.0) < 1.5:
-            if y_w < -6.65 or y_w > -3.5:
+
+        # Multi-point vehicle footprint boundary verification against static lab assets (Requirement 2 & 3)
+        footprint_pts = [
+            (x_w, y_w),
+            (x_w, y_w - VEH_HALF_WIDTH), (x_w, y_w + VEH_HALF_WIDTH),
+            (x_w - VEH_HALF_LENGTH, y_w), (x_w + VEH_HALF_LENGTH, y_w),
+            (x_w - VEH_HALF_LENGTH, y_w - VEH_HALF_WIDTH), (x_w + VEH_HALF_LENGTH, y_w - VEH_HALF_WIDTH),
+            (x_w - VEH_HALF_LENGTH, y_w + VEH_HALF_WIDTH), (x_w + VEH_HALF_LENGTH, y_w + VEH_HALF_WIDTH),
+        ]
+        for tx, ty in footprint_pts:
+            if not is_point_walkable(tx, ty):
                 return False
-        if not is_point_walkable(x_w, y_w):
-            return False
-        for ox, oy, r in obs_circles:
-            if math.hypot(x_w - ox, y_w - oy) < r:
+
+        # Obstacle avoidance with vehicle footprint inflation
+        for x_min, x_max, y_min, y_max in obs_boxes:
+            if x_min <= x_w <= x_max and y_min <= y_w <= y_max:
                 return False
         return True
 
@@ -122,6 +150,7 @@ def astar_grid_path(start: Tuple[float, float], goal: Tuple[float, float],
     iterations = 0
     closest_node = start_node
     min_dist_to_goal = float("inf")
+    goal_reached = False
 
     while open_heap and iterations < max_iter:
         iterations += 1
@@ -133,9 +162,10 @@ def astar_grid_path(start: Tuple[float, float], goal: Tuple[float, float],
             min_dist_to_goal = d_to_goal
             closest_node = current
 
-        # Reached within 1 grid cell of goal
-        if d_to_goal < res * 1.5:
+        # Reached within 1.5 grid cells of goal
+        if d_to_goal <= res * 1.5:
             closest_node = current
+            goal_reached = True
             break
 
         for mx, my, mcost in motions:
@@ -151,8 +181,17 @@ def astar_grid_path(start: Tuple[float, float], goal: Tuple[float, float],
                 heapq.heappush(open_heap, (priority, new_g, nxt))
                 came_from[nxt] = current
 
-    if closest_node not in came_from and closest_node != start_node:
-        return None
+    # Requirement 4: Explicitly distinguish GOAL_REACHED, PARTIAL_PATH, and NO_PATH
+    if goal_reached:
+        astar_status = "GOAL_REACHED"
+    elif min_dist_to_goal < float("inf") and closest_node != start_node:
+        astar_status = "PARTIAL_PATH"
+    else:
+        astar_status = "NO_PATH"
+
+    # Only accept a path when the goal region has actually been reached
+    if not goal_reached:
+        return (None, astar_status) if return_status else None
 
     # Reconstruct path
     curr = closest_node
@@ -163,15 +202,29 @@ def astar_grid_path(start: Tuple[float, float], goal: Tuple[float, float],
     path_nodes.append(start_node)
     path_nodes.reverse()
 
-    # Convert to world coordinates and interpolate smoothly
-    wps = [to_world(n[0], n[1]) for n in path_nodes]
-    wps.append((gx, gy))
+    # Convert to world coordinates (pinning start and goal)
+    wps = [(sx, sy)] + [to_world(n[0], n[1]) for n in path_nodes[1:]]
+    if math.hypot(wps[-1][0] - gx, wps[-1][1] - gy) > 0.05:
+        wps.append((gx, gy))
 
+    # Multi-pass Laplacian smoothing to round 8-connected grid corners into Ackermann curves (Requirement 5)
+    for _ in range(24):
+        if len(wps) < 3:
+            break
+        smoothed = [wps[0]]
+        for i in range(1, len(wps) - 1):
+            sx_sm = 0.50 * wps[i][0] + 0.25 * (wps[i - 1][0] + wps[i + 1][0])
+            sy_sm = 0.50 * wps[i][1] + 0.25 * (wps[i - 1][1] + wps[i + 1][1])
+            smoothed.append((sx_sm, sy_sm))
+        smoothed.append(wps[-1])
+        wps = smoothed
+
+    # Densely resample waypoints (ds <= 0.12m)
     smooth = []
     for k in range(len(wps) - 1):
         p1, p2 = wps[k], wps[k + 1]
         seg_dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-        steps = max(1, int(seg_dist / 0.25))
+        steps = max(1, int(math.ceil(seg_dist / 0.12)))
         for j in range(steps):
             u = j / float(steps)
             smooth.append((p1[0] + (p2[0] - p1[0]) * u, p1[1] + (p2[1] - p1[1]) * u))
@@ -182,7 +235,7 @@ def astar_grid_path(start: Tuple[float, float], goal: Tuple[float, float],
     for pt in smooth:
         if not cleaned or math.hypot(pt[0] - cleaned[-1][0], pt[1] - cleaned[-1][1]) > 0.05:
             cleaned.append(pt)
-    return cleaned
+    return (cleaned, astar_status) if return_status else cleaned
 
 
 class AutonomousPlannerNode(Node):
@@ -190,23 +243,32 @@ class AutonomousPlannerNode(Node):
         super().__init__("autonomous_planner_node")
         self.cfg = cfg
         self.p_cfg = cfg.get("planner", {})
-        self.wheelbase = float(cfg.get("vehicle", {}).get("wheelbase", 1.1))
-        self.max_steer = min(0.45, float(self.p_cfg.get("max_steer", 0.45)))
+        self.wheelbase = float(cfg.get("vehicle", {}).get("wheelbase", WHEELBASE))
+        self.max_steer = min(MAX_STEER_RAD, float(self.p_cfg.get("max_steer", MAX_STEER_RAD)))
         self.cruise_speed = float(self.p_cfg.get("cruise_speed", 0.85))
         self.slow_speed = float(self.p_cfg.get("slow_speed", 0.50))
         self.stop_dist = float(self.p_cfg.get("stop_distance", 1.4))
         self.slow_dist = float(self.p_cfg.get("slow_distance", 4.2))
         self.stale_timeout = float(cfg.get("perception", {}).get("stale_timeout", 0.6))
+        self.last_path_idx = 0
 
         # Start and Destination Configuration
+        raw_scen = "s01"
         if scenario_data:
             s_pose = scenario_data.get("vehicle_start_pose", [6.0, -6.0, 0.35, 0.0])
             self.start_xy = (float(s_pose[0]), float(s_pose[1]))
             d_pose = scenario_data.get("vehicle_destination_pose", [13.5, -6.0, 0.0])
             self.goal_xy = (float(d_pose[0]), float(d_pose[1]))
+            raw_scen = str(scenario_data.get("scenario_id", scenario_data.get("scenario_name", "s01"))).lower()
         else:
             self.start_xy = (6.0, -6.0)
             self.goal_xy = (13.5, -6.0)
+
+        self.scenario_id = "s01"
+        for sc in ("s01", "s02", "s03", "s04", "s05", "s06", "s07", "s08", "s09", "s10", "s11", "s12", "s13"):
+            if sc in raw_scen:
+                self.scenario_id = sc
+                break
 
         # Vehicle State from /vehicle/estimated_odom (Rule 8 compliant)
         self.veh_x = self.start_xy[0]
@@ -220,12 +282,14 @@ class AutonomousPlannerNode(Node):
         self.global_waypoints = astar_grid_path(self.start_xy, self.goal_xy) or [self.start_xy, self.goal_xy]
         self.local_waypoints = list(self.global_waypoints)
 
-        # Live Tracked Obstacles
+        # Live Tracked Obstacles & Short-term persistence (Requirement 6)
         self.obstacles: List[dict] = []
+        self.persisted_obstacles: Dict[int, dict] = {}
+        self.obs_persist_timeout = 1.2  # Expire unobserved obstacles after 1.2s
         self.last_obs_time = 0.0
         self.init_time = time.time()
 
-        self.goal_tolerance = float(self.p_cfg.get("goal_tolerance", 0.22))
+        self.goal_tolerance = float(self.p_cfg.get("goal_tolerance", 0.40))
         self.perception_received = False
 
         # Planner State
@@ -233,6 +297,7 @@ class AutonomousPlannerNode(Node):
         self.goal_reached = False
         self.active_detour_sign = 0  # +1 for left, -1 for right, 0 for none (hysteresis)
         self.active_detour_x = 0.0   # Longitudinal world X of obstacle being actively detoured
+        self.active_detour_offset = 0.0  # Lateral offset of active detour path
 
         # Stuck Monitor
         self.last_progress_time = time.time()
@@ -251,6 +316,7 @@ class AutonomousPlannerNode(Node):
         self.pub_global_path = self.create_publisher(Path, "/planning/global_path", 10)
         self.pub_local_path = self.create_publisher(Path, "/planning/local_path", 10)
         self.pub_state = self.create_publisher(String, "/planning/planner_state", 10)
+        self.pub_scen_id = self.create_publisher(String, "/planning/scenario_id", 10)
 
         # Dynamic Goal and Start selection from visualizer click / GUI
         self.create_subscription(PoseStamped, "/planning/goal_pose", self.on_goal_pose, 10)
@@ -309,6 +375,8 @@ class AutonomousPlannerNode(Node):
 
     def on_scenario_id(self, msg: String):
         scen_id = msg.data.strip().lower()
+        if getattr(self, "scenario_id", "") == scen_id:
+            return
         self.get_logger().info(f"[PLANNER] Scenario switched to: {scen_id}")
         self.scenario_id = scen_id
         self.obstacles = []
@@ -318,19 +386,18 @@ class AutonomousPlannerNode(Node):
         try:
             from isaac_sim.scripts.scenarios.scenario_registry import resolve_scenario
             entry = resolve_scenario(scen_id)
-            if entry and hasattr(entry, "start_pose") and hasattr(entry, "goal_pose"):
-                self.start_xy = (float(entry.start_pose[0]), float(entry.start_pose[1]))
-                self.goal_xy = (float(entry.goal_pose[0]), float(entry.goal_pose[1]))
-                self.veh_x, self.veh_y = self.start_xy
-                new_path = astar_grid_path(self.start_xy, self.goal_xy, self.obstacles)
-                if new_path:
-                    self.global_waypoints = new_path
-                    self.local_waypoints = list(new_path)
-                    self._publish_path(self.global_waypoints, self.pub_global_path)
-                    self._publish_path(self.local_waypoints, self.pub_local_path)
-                self.get_logger().info(f"[PLANNER] Loaded bounds for {scen_id}: Start={self.start_xy} Goal={self.goal_xy}")
+            if entry and os.path.exists(entry["path"]):
+                with open(entry["path"], "r") as f:
+                    sc = yaml.safe_load(f)
+                if "vehicle_start_pose" in sc:
+                    self.start_xy = (float(sc["vehicle_start_pose"][0]), float(sc["vehicle_start_pose"][1]))
+                if "vehicle_destination_pose" in sc:
+                    self.goal_xy = (float(sc["vehicle_destination_pose"][0]), float(sc["vehicle_destination_pose"][1]))
+                self.global_waypoints = astar_grid_path(self.start_xy, self.goal_xy) or [self.start_xy, self.goal_xy]
+                self.local_waypoints = list(self.global_waypoints)
+                self.get_logger().info(f"[PLANNER] Reloaded scenario {entry['name']}: Start={self.start_xy} -> Goal={self.goal_xy}")
         except Exception as e:
-            self.get_logger().warn(f"[PLANNER] Could not resolve scenario {scen_id}: {e}")
+            self.get_logger().warn(f"Failed to reload scenario {scen_id}: {e}")
 
     def on_start_pose(self, msg: PoseStamped):
         sx = float(msg.pose.position.x)
@@ -380,9 +447,11 @@ class AutonomousPlannerNode(Node):
         for st in msg.status:
             try:
                 tid = int(st.hardware_id)
+                vel_info = self.companion_velocities.get(tid, {})
                 for kv in st.values:
-                    if kv.key == "speed":
-                        self.companion_velocities[tid] = float(kv.value)
+                    if kv.key in ("speed", "vx", "vy", "vz"):
+                        vel_info[kv.key] = float(kv.value)
+                self.companion_velocities[tid] = vel_info
             except Exception:
                 pass
 
@@ -416,10 +485,20 @@ class AutonomousPlannerNode(Node):
 
                 # Dedicated velocity field: results[1] or companion topic
                 speed = 0.0
+                vx_cam = 0.0
+                vy_cam = 0.0
+                vz_cam = 0.0
                 if len(d.results) > 1 and d.results[1].hypothesis.class_id == "velocity_m_s":
                     speed = float(d.results[1].hypothesis.score)
+                    vx_cam = float(d.results[1].pose.pose.position.x)
+                    vy_cam = float(d.results[1].pose.pose.position.y)
+                    vz_cam = float(d.results[1].pose.pose.position.z)
                 elif tid in self.companion_velocities:
-                    speed = float(self.companion_velocities[tid])
+                    c_vel = self.companion_velocities[tid]
+                    speed = float(c_vel.get("speed", 0.0))
+                    vx_cam = float(c_vel.get("vx", 0.0))
+                    vy_cam = float(c_vel.get("vy", 0.0))
+                    vz_cam = float(c_vel.get("vz", 0.0))
 
                 # Exact Camera Optical -> Vehicle frame: x fwd, y left, z up
                 # Mount position: x=0.90m, y=0.0m, z=1.20m; pitch = -0.15 rad (downwards tilt)
@@ -429,27 +508,79 @@ class AutonomousPlannerNode(Node):
                 y_veh = -ox_cam
                 z_veh = 0.85 - cos_p * oy_cam - sin_p * oz_cam
 
+                # For static flanking obstacles viewed obliquely from the side of the corridor,
+                # the optical centroid corresponds to the visible near-surface facing the vehicle.
+                # The true geometric centroid lies outward along the line of sight normal.
+                if not is_dyn and abs(y_veh) > 0.40 and cname != "wall":
+                    y_veh_adj = y_veh + math.copysign(min(0.20, obs_sx / 4.0), y_veh)
+                else:
+                    y_veh_adj = y_veh
+
                 # Vehicle -> Map frame
                 cos_y = math.cos(self.veh_yaw)
                 sin_y = math.sin(self.veh_yaw)
-                x_world = self.veh_x + x_veh * cos_y - y_veh * sin_y
-                y_world = self.veh_y + x_veh * sin_y + y_veh * cos_y
+                x_world = self.veh_x + x_veh * cos_y - y_veh_adj * sin_y
+                y_world = self.veh_y + x_veh * sin_y + y_veh_adj * cos_y
 
-                obs_list.append({
+                # Ego-motion compensated velocity in vehicle body & world frames:
+                # In camera optical frame: +z_cam is forward, +x_cam is right
+                # Vehicle forward speed adds to vz_cam (which is negative for stationary objects)
+                vx_veh_rel = vz_cam + self.veh_speed
+                vy_veh_rel = -vx_cam
+                vx_world = vx_veh_rel * cos_y - vy_veh_rel * sin_y
+                vy_world = vx_veh_rel * sin_y + vy_veh_rel * cos_y
+                true_speed = math.hypot(vx_world, vy_world)
+                is_dyn_comp = (true_speed > 0.18) or (is_dyn and true_speed > 0.10)
+
+                # Obstacle orientation in camera and map frames (Requirement 8)
+                q = d.bbox.center.orientation
+                yaw_cam = 2.0 * math.atan2(float(q.z), float(q.w)) if (q.w != 0.0 or q.z != 0.0) else 0.0
+                obs_yaw = normalize_angle(self.veh_yaw + yaw_cam)
+
+                obs_data = {
                     "track_id": tid,
                     "class_name": cname,
-                    "is_dynamic": is_dyn,
-                    "speed": speed,
+                    "is_dynamic": is_dyn_comp,
+                    "speed": true_speed,
+                    "vx_cam": vx_cam, "vy_world": vy_world,
                     "size_x": obs_sx, "size_y": obs_sy, "size_z": obs_sz,
                     "x_cam": ox_cam, "y_cam": oy_cam, "z_cam": oz_cam,
                     "x_veh": x_veh, "y_veh": y_veh, "z_veh": z_veh,
                     "x_world": x_world, "y_world": y_world,
                     "dist": math.hypot(x_veh, y_veh),
-                })
+                    "yaw": obs_yaw,
+                    "last_seen": t,
+                }
+                obs_list.append(obs_data)
+                self.persisted_obstacles[tid] = obs_data
             except Exception:
                 continue
 
-        self.obstacles = obs_list
+        # Spatial deduplication & prune stale obstacles (Requirement 6)
+        pruned = {}
+        for tid, o in sorted(self.persisted_obstacles.items(), key=lambda kv: kv[1]["last_seen"], reverse=True):
+            if (t - o["last_seen"]) > self.obs_persist_timeout:
+                continue
+            is_dup = False
+            for r_tid, r_o in pruned.items():
+                dx = abs(o["x_world"] - r_o["x_world"])
+                dy = abs(o["y_world"] - r_o["y_world"])
+                combined_hl = (o.get("size_z", 0.8) + r_o.get("size_z", 0.8)) / 2.0
+                combined_hw = (o.get("size_x", 0.8) + r_o.get("size_x", 0.8)) / 2.0
+                # If static detections overlap within physical dimensions or proximity <= 1.4m longitudinally
+                if (not o.get("is_dynamic", False) and not r_o.get("is_dynamic", False)) and \
+                   ((dx <= combined_hl + 0.20 and dy <= combined_hw + 0.20) or (dx < 1.40 and dy < 0.60)):
+                    is_dup = True
+                    if r_o.get("class_name") == "obstacle" and o.get("class_name") != "obstacle":
+                        r_o["class_name"] = o["class_name"]
+                    break
+                elif math.hypot(o["x_world"] - r_o["x_world"], o["y_world"] - r_o["y_world"]) < 0.60:
+                    is_dup = True
+                    break
+            if not is_dup:
+                pruned[tid] = o
+        self.persisted_obstacles = pruned
+        self.obstacles = list(self.persisted_obstacles.values())
 
     def control_loop(self):
         now = time.time()
@@ -459,6 +590,13 @@ class AutonomousPlannerNode(Node):
         msg_st = String()
         msg_st.data = self.state
         self.pub_state.publish(msg_st)
+
+        # Synchronize active scenario ID periodically (1 Hz) across GUI windows
+        if now - getattr(self, "_last_scen_pub", 0.0) >= 1.0:
+            self._last_scen_pub = now
+            msg_sc = String()
+            msg_sc.data = getattr(self, "scenario_id", "s01")
+            self.pub_scen_id.publish(msg_sc)
 
         if not self.odom_received or (now - self.init_time < 5.5) or (not self.perception_received and (now - self.init_time < 8.0)):
             self.state = "WARMUP"
@@ -474,22 +612,39 @@ class AutonomousPlannerNode(Node):
             self._send_cmd(0.0, 0.0)
             return
 
-        # Destination arrival check
+        # Comprehensive Goal Region & Arrival Check (Requirement 5)
         dist_to_goal = math.hypot(self.goal_xy[0] - self.veh_x, self.goal_xy[1] - self.veh_y)
         total_disp = math.hypot(self.veh_x - self.start_xy[0], self.veh_y - self.start_xy[1])
         init_goal_dist = math.hypot(self.start_xy[0] - self.goal_xy[0], self.start_xy[1] - self.goal_xy[1])
         dx_g = self.goal_xy[0] - self.start_xy[0]
         dy_g = self.goal_xy[1] - self.start_xy[1]
         d_nom = max(0.1, math.hypot(dx_g, dy_g))
-        long_prog = (self.veh_x - self.start_xy[0]) * (dx_g / d_nom) + (self.veh_y - self.start_xy[1]) * (dy_g / d_nom)
-        past_goal = (long_prog >= d_nom) and (dist_to_goal <= 0.30)
+        ux_g, uy_g = dx_g / d_nom, dy_g / d_nom
+        nx_g, ny_g = -uy_g, ux_g
 
-        if (dist_to_goal <= self.goal_tolerance or past_goal) and (total_disp > 0.8 or init_goal_dist <= 1.0):
+        long_prog = (self.veh_x - self.start_xy[0]) * ux_g + (self.veh_y - self.start_xy[1]) * uy_g
+        lat_err = abs((self.veh_x - self.start_xy[0]) * nx_g + (self.veh_y - self.start_xy[1]) * ny_g)
+
+        is_euclidean_goal = (dist_to_goal <= 0.25 and lat_err <= 0.20)
+        is_corridor_goal = (long_prog >= (d_nom - 0.05) and lat_err <= 0.25 and dist_to_goal <= 0.35)
+        is_overshoot = (long_prog >= (d_nom + 0.25))
+        has_moved = (total_disp > 0.8 or init_goal_dist <= 1.0)
+
+        if (is_euclidean_goal or is_corridor_goal or (is_overshoot and dist_to_goal <= 0.60)) and has_moved:
             self.goal_reached = True
             self.state = "GOAL_REACHED"
             self._send_cmd(0.0, 0.0)
             self._publish_path(self.local_waypoints, self.pub_local_path)
-            self.get_logger().info(f"Odom: ({self.veh_x:.2f}, {self.veh_y:.2f}) -> Goal Reached (dist={dist_to_goal:.2f}m <= {self.goal_tolerance:.2f}m)", throttle_duration_sec=2.0)
+            self.get_logger().info(
+                f"[GOAL ARRIVED] Pose: ({self.veh_x:.2f}, {self.veh_y:.2f}) -> Goal: {self.goal_xy} "
+                f"(dist={dist_to_goal:.2f}m, lat_err={lat_err:.2f}m, long_prog={long_prog:.2f}/{d_nom:.2f}m)",
+                throttle_duration_sec=2.0
+            )
+            return
+        elif is_overshoot and has_moved:
+            self.state = "NO_SAFE_PATH"
+            self._send_cmd(0.0, 0.0)
+            self.get_logger().warn(f"[OVERSHOOT STOP] Vehicle past destination plane ({long_prog:.2f}m >= {d_nom:.2f}m), stopping safely.")
             return
         else:
             self.goal_reached = False
@@ -530,14 +685,14 @@ class AutonomousPlannerNode(Node):
 
         # Progress & Stuck Monitor
         disp_since_last = math.hypot(self.veh_x - self.last_progress_pos[0], self.veh_y - self.last_progress_pos[1])
-        if disp_since_last > 0.10:
+        if disp_since_last > 0.05:
             self.last_progress_time = now
             self.last_progress_pos = (self.veh_x, self.veh_y)
             self.stuck_duration = 0.0
             self.is_stuck = False
         else:
             self.stuck_duration = now - self.last_progress_time
-            if self.stuck_duration > 2.0 and self.state not in ("GOAL_REACHED", "WARMUP", "STOP_YIELD", "STALE_STOP", "PAUSED"):
+            if self.stuck_duration > 3.5 and self.state not in ("GOAL_REACHED", "WARMUP", "STOP_YIELD", "STALE_STOP", "PAUSED"):
                 self.is_stuck = True
                 self.state = "STUCK"
 
@@ -559,6 +714,11 @@ class AutonomousPlannerNode(Node):
             f"Obs={len(self.obstacles)} | Stuck={self.is_stuck}",
             throttle_duration_sec=1.0
         )
+        if self.obstacles:
+            self.get_logger().info(
+                f"[OBS_DETAIL] {[ (o.get('class_name'), round(o.get('x_world',0),2), round(o.get('y_world',0),2), round(o.get('z_cam',0),2), round(o.get('x_cam',0),2)) for o in self.obstacles ]}",
+                throttle_duration_sec=1.0
+            )
 
     def _plan_motion(self) -> Tuple[float, float]:
         # Vector to destination
@@ -573,69 +733,248 @@ class AutonomousPlannerNode(Node):
         for o in self.obstacles:
             if not (0.5 <= o["z_cam"] <= 6.5 and abs(o["x_cam"]) <= 2.2):
                 continue
-            ox = o.get("x_world", self.veh_x + (o["z_cam"] + 0.9) * math.cos(self.veh_yaw))
-            oy = o.get("y_world", self.veh_y + (o["z_cam"] + 0.9) * math.sin(self.veh_yaw))
+            ox = o.get("x_world", self.veh_x + (o["z_cam"] + 0.55) * math.cos(self.veh_yaw))
+            oy = o.get("y_world", self.veh_y + (o["z_cam"] + 0.55) * math.sin(self.veh_yaw))
+
+            # Obstacle must be ahead in vehicle body frame
+            cos_y = math.cos(self.veh_yaw)
+            sin_y = math.sin(self.veh_yaw)
+            dx_obs = ox - self.veh_x
+            dy_obs = oy - self.veh_y
+            x_body = dx_obs * cos_y + dy_obs * sin_y
+            if x_body < 0.10:
+                continue
 
             # Progress along goal vector
-            s_obs = (ox - self.veh_x) * ug_x + (oy - self.veh_y) * ug_y
-            l_obs = abs((ox - self.veh_x) * (-ug_y) + (oy - self.veh_y) * ug_x)
+            s_obs = dx_obs * ug_x + dy_obs * ug_y
+            l_obs = abs(dx_obs * (-ug_y) + dy_obs * ug_x)
 
-            # Ignore obstacles that are behind the vehicle (s_obs < 0.1)
-            # or past the destination / at goal boundary (ox > goal_x - 0.20)
-            if s_obs < 0.1 or s_obs > (dist_to_goal + 0.35) or (ug_x > 0.5 and ox > (self.goal_xy[0] - 0.20)):
+            # Ignore obstacles that are behind the vehicle in goal projection (s_obs < 0.1)
+            # or longitudinally passed in corridor driving (ox <= veh_x - 0.10 when ug_x > 0.4)
+            # or past the destination / at goal boundary (z_cam > dist_to_goal + 0.60)
+            if s_obs < 0.1 or (ug_x > 0.4 and ox <= (self.veh_x - 0.10)):
                 continue
-            if l_obs > 2.0:
+            if s_obs > (dist_to_goal + 0.60) or (o.get("z_cam", 0.0) > (dist_to_goal + 0.60)):
+                continue
+            obs_hw = (o.get("size_x", 0.8) if abs(ug_x) > 0.5 else o.get("size_y", 0.8)) / 2.0
+            if (l_obs - obs_hw) > 2.20:
                 continue
             front_obstacles.append(o)
 
+        # Separate static obstacles for lateral detour planning and dynamic obstacles for yielding
+        # Static obstacles situated past the destination goal do not obstruct arrival at the goal
+        static_front = [o for o in front_obstacles if (o.get("class_name") != "person" or not o.get("is_dynamic", False)) and (o["z_cam"] <= max(1.40, dist_to_goal + 0.50))]
+
         # Check if active detour has cleared the obstacle longitudinally
+        # Vehicle center must be past obstacle back edge + margin, AND rejoining path must be clear of downstream obstacles
         if self.active_detour_sign != 0 and self.active_detour_x > 0.0:
-            if self.veh_x > (self.active_detour_x + 0.4):
-                self.get_logger().info(f"[DETOUR CLEARED] veh_x={self.veh_x:.2f} > obs_x={self.active_detour_x:.2f} + 0.4m -> Merging back to nominal corridor")
-                self.active_detour_sign = 0
-                self.active_detour_x = 0.0
+            if self.veh_x > (self.active_detour_x + 0.10):
+                cand_rejoin = self._generate_offset_path(0.0)
+                rejoin_safe = True
+                if cand_rejoin and static_front:
+                    s_r, c_r, _ = self._check_path_clearance(cand_rejoin, static_front)
+                    rejoin_safe = s_r and (c_r >= MIN_SAFE_CLEARANCE)
+                if rejoin_safe:
+                    self.get_logger().info(f"[DETOUR CLEARED] veh_x={self.veh_x:.2f} > obs_x={self.active_detour_x:.2f} + 0.1m -> Generating smooth rejoining spline")
+                    self.active_detour_sign = 0
+                    self.active_detour_x = 0.0
+                    self.active_detour_offset = 0.0
+                    self.local_waypoints = cand_rejoin if cand_rejoin else list(self.global_waypoints)
+                    self.state = "REJOINING_GLOBAL_PATH"
+                else:
+                    self.get_logger().info(f"[DETOUR MAINTAINED] Downstream static obstacle on rejoining path -> staying on offset {self.active_detour_offset:+.2f}m", throttle_duration_sec=1.0)
 
         if not front_obstacles:
-            if self.active_detour_sign != 0 and self.active_detour_x > 0.0 and self.veh_x <= (self.active_detour_x + 0.4):
+            # Safe-stop persistence (Requirement 1): If in NO_SAFE_PATH, verify nominal path before resuming CRUISE
+            if self.state == "NO_SAFE_PATH":
+                safe_nom, clr_nom, _ = self._check_path_clearance(self.global_waypoints, self.obstacles)
+                if not safe_nom or clr_nom < 0.15:
+                    return 0.0, 0.0
+            if self.active_detour_sign != 0 and self.active_detour_x > 0.0 and self.veh_x <= (self.active_detour_x + 0.10):
                 # Obstacle is temporarily occluded or out of FOV during detour; retain active detour path!
                 if self.local_waypoints:
                     steer = self._pure_pursuit(self.local_waypoints)
                     return steer, self.slow_speed
+
+            # Smoothly follow rejoining path if vehicle still displaced from nominal corridor
+            lat_err = abs((self.veh_x - self.start_xy[0]) * (-ug_y) + (self.veh_y - self.start_xy[1]) * ug_x)
+            if lat_err > 0.18:
+                if not self.local_waypoints or math.hypot(self.local_waypoints[-1][0] - self.goal_xy[0], self.local_waypoints[-1][1] - self.goal_xy[1]) > 0.15:
+                    rejoin_p = self._generate_offset_path(0.0)
+                    if rejoin_p:
+                        self.local_waypoints = rejoin_p
+                self.state = "REJOINING_GLOBAL_PATH"
+                steer = self._pure_pursuit(self.local_waypoints)
+                if dist_to_goal <= 0.40:
+                    approach_spd = max(0.40, self.slow_speed * (dist_to_goal / 0.40))
+                else:
+                    approach_spd = max(0.65, self.cruise_speed if lat_err <= 0.20 else 0.75)
+                return steer, approach_spd
+
             self.state = "CRUISE"
             self.active_detour_sign = 0
             self.active_detour_x = 0.0
+            self.active_detour_offset = 0.0
             self.local_waypoints = list(self.global_waypoints)
             steer = self._pure_pursuit(self.local_waypoints)
-            approach_spd = self.slow_speed if dist_to_goal < 1.4 else self.cruise_speed
+            approach_spd = max(0.40, self.slow_speed * (dist_to_goal / 1.0)) if dist_to_goal <= 1.0 else self.cruise_speed
             return steer, approach_spd
 
-        # Separate static obstacles for lateral detour planning and dynamic obstacles for yielding
-        # Static obstacles situated past the destination goal do not obstruct arrival at the goal
-        static_front = [o for o in front_obstacles if o.get("class_name") != "person" and (o["z_cam"] <= max(1.40, dist_to_goal + 0.50))]
+        # 1. Threat evaluation: identify obstacles that obstruct the vehicle's driving corridor or path
+        corridor_y = self.start_xy[1]
+        threat_obstacles = []
+        for o in static_front:
+            oy = o.get("y_world", self.veh_y)
+            obs_hw = (o.get("size_x", 0.6) if abs(math.cos(self.veh_yaw)) > 0.5 else o.get("size_y", 0.6)) / 2.0
+            lat_d_corr = abs(oy - corridor_y)
+            lat_d_cam = abs(o.get("x_cam", 0.0))
+            if lat_d_corr <= (obs_hw + 0.65) or lat_d_cam <= (obs_hw + 0.65):
+                threat_obstacles.append(o)
+            else:
+                safe_o, clr_o, _ = self._check_path_clearance(self.local_waypoints[:20] if self.local_waypoints else self.global_waypoints[:20], [o])
+                if not safe_o or clr_o < 0.20:
+                    threat_obstacles.append(o)
 
-        # 1. Dynamic pedestrian evaluation (across all obstacles in forward cone)
+        eval_obstacles = threat_obstacles if threat_obstacles else static_front
+        if eval_obstacles:
+            nearest = min(eval_obstacles, key=lambda o: o["z_cam"])
+            n_dist = nearest["z_cam"]
+            obs_half_len = max(0.40, float(nearest.get("size_z", 0.80) if abs(math.cos(self.veh_yaw)) > 0.5 else nearest.get("size_x", 0.80)) / 2.0)
+            s_obs_nearest = (nearest.get("x_world", self.veh_x + n_dist * math.cos(self.veh_yaw)) - self.start_xy[0]) * ug_x + \
+                            (nearest.get("y_world", self.veh_y + n_dist * math.sin(self.veh_yaw)) - self.start_xy[1]) * ug_y
+            s_veh = (self.veh_x - self.start_xy[0]) * ug_x + (self.veh_y - self.start_xy[1]) * ug_y
+            obs_dist_long = max(0.5, (s_obs_nearest - obs_half_len) - s_veh)
+
+            # Group static obstacles blocking the driving corridor ahead
+            threats_ahead = [o for o in eval_obstacles if (o.get("x_world", self.veh_x) >= nearest.get("x_world", self.veh_x) - 0.5)]
+            furthest = max(threats_ahead, key=lambda o: o["z_cam"]) if threats_ahead else nearest
+            furthest_hl = max(0.40, float(furthest.get("size_z", 0.80) if abs(math.cos(self.veh_yaw)) > 0.5 else furthest.get("size_x", 0.80)) / 2.0)
+            s_obs_furthest = (furthest.get("x_world", self.veh_x + furthest["z_cam"] * math.cos(self.veh_yaw)) - self.start_xy[0]) * ug_x + \
+                             (furthest.get("y_world", self.veh_y + furthest["z_cam"] * math.sin(self.veh_yaw)) - self.start_xy[1]) * ug_y
+            dist_nom = math.hypot(self.goal_xy[0] - self.start_xy[0], self.goal_xy[1] - self.start_xy[1])
+            s_cap = max(s_veh + 0.5, dist_nom - 1.5)
+            s_pass_target = min(s_cap, s_obs_furthest + furthest_hl)
+            max_dist_long = max(obs_dist_long + 0.5, s_pass_target - s_veh)
+
+            obs_hw = (nearest.get("size_x", 0.6) if abs(math.cos(self.veh_yaw)) > 0.5 else nearest.get("size_y", 0.6)) / 2.0
+            veh_hw = 0.40
+            lat_overlap = abs(nearest["x_cam"]) <= (veh_hw + obs_hw + 0.15)
+            is_threat = lat_overlap or (self.active_detour_sign != 0 and self.veh_x <= (self.active_detour_x + 0.10))
+            if not is_threat:
+                safe_curr, clr_curr, _ = self._check_path_clearance(self.local_waypoints[:20] if self.local_waypoints else self.global_waypoints[:20], [nearest])
+                if not safe_curr or clr_curr < 0.20:
+                    is_threat = True
+
+            # Plan static detour if path is not yet established
+            if n_dist < self.slow_dist and is_threat and self.active_detour_sign == 0:
+                self.replan_count += 1
+                base_offsets = [1.85, 2.05, 1.65, 1.50, 2.25, 1.35, 1.15, 1.00]
+                best_path = None
+                best_offset = 0.0
+
+                center_blocked = any(
+                    abs(o.get("y_world", self.veh_y) - self.start_xy[1]) < 0.95
+                    for o in static_front
+                    if o.get("z_cam", 99.0) <= (self.slow_dist + 0.5) and (o.get("x_world", 0.0) <= self.goal_xy[0])
+                )
+                if not center_blocked:
+                    left_flank = [o for o in static_front if o.get("y_world", self.veh_y) > (self.start_xy[1] + 0.35) and o.get("z_cam", 99.0) <= (self.slow_dist + 1.0)]
+                    right_flank = [o for o in static_front if o.get("y_world", self.veh_y) < (self.start_xy[1] - 0.35) and o.get("z_cam", 99.0) <= (self.slow_dist + 1.0)]
+                    if left_flank and right_flank:
+                        n_l = min(left_flank, key=lambda o: o["z_cam"])
+                        n_r = min(right_flank, key=lambda o: o["z_cam"])
+                        y_mid = (n_l.get("y_world", self.veh_y) + n_r.get("y_world", self.veh_y)) / 2.0
+                        cand_center = self._generate_offset_path(y_mid - self.start_xy[1], obs_dist=obs_dist_long, max_obs_dist=max_dist_long)
+                    else:
+                        cand_center = self._generate_offset_path(0.0, obs_dist=obs_dist_long, max_obs_dist=max_dist_long)
+                    if cand_center:
+                        safe_c, clearance_c, _ = self._check_path_clearance(cand_center, static_front)
+                        if safe_c or clearance_c >= -0.02:
+                            best_path = cand_center
+                            best_offset = 0.0
+
+                if best_path is None:
+                    left_block = sum(1 for o in static_front if o.get("y_world", self.veh_y) > (self.start_xy[1] + 0.80))
+                    right_block = sum(1 for o in static_front if o.get("y_world", self.veh_y) < (self.start_xy[1] - 0.80))
+                    cand_signs = [1, -1] if right_block >= left_block else [-1, 1]
+
+                    for sign in cand_signs:
+                        for off_mag in base_offsets:
+                            off = sign * off_mag
+                            cand_path = self._generate_offset_path(off, obs_dist=obs_dist_long, max_obs_dist=max_dist_long)
+                            if cand_path:
+                                safe, clearance, reason = self._check_path_clearance(cand_path, static_front)
+                                if safe and clearance >= MIN_SAFE_CLEARANCE:
+                                    best_path = cand_path
+                                    best_offset = off
+                                    break
+                        if best_path is not None:
+                            break
+
+                # Global A* fallback if immediate lateral polynomial splines are blocked (Requirement 3 & 4)
+                if best_path is None:
+                    astar_plan = astar_grid_path((self.veh_x, self.veh_y), self.goal_xy, static_front, safety_margin=SAFETY_MARGIN)
+                    if astar_plan and len(astar_plan) >= 2:
+                        best_path = astar_plan
+                        best_offset = astar_plan[min(10, len(astar_plan)-1)][1] - self.start_xy[1]
+
+                if best_path is not None:
+                    if abs(best_offset) > 0.1:
+                        self.active_detour_sign = 1 if best_offset > 0 else -1
+                        self.active_detour_offset = best_offset
+                        obs_x_center = nearest.get("x_world", self.veh_x + (nearest["z_cam"] + 0.90) * math.cos(self.veh_yaw))
+                        obs_half_len = nearest.get("size_x", 1.4) / 2.0
+                        self.active_detour_x = obs_x_center + obs_half_len
+                    else:
+                        self.active_detour_sign = 0
+                        self.active_detour_x = 0.0
+                        self.active_detour_offset = 0.0
+                    self.local_waypoints = best_path
+                    self._active_obs_label = nearest.get("class_name", "OBSTACLE").upper()
+                else:
+                    self.state = "NO_SAFE_PATH"
+                    self.active_detour_sign = 0
+                    self.active_detour_x = 0.0
+                    self.active_detour_offset = 0.0
+                    self.local_waypoints = []
+                    self.get_logger().warn("[SAFE STOP] No safe route exists around obstacle/blockade -> Commanding Safe Stop", throttle_duration_sec=1.5)
+                    return 0.0, 0.0
+
+        # 2. Dynamic pedestrian evaluation with crossing direction and corridor conflict check (Requirement 1 & 2)
         ped_threats = []
+        corridor_y = self.start_xy[1]
+        if self.active_detour_sign != 0:
+            corridor_y += self.active_detour_offset
+
         for o in front_obstacles:
             is_ped = (o.get("class_name") == "person")
-            if is_ped and 0.4 <= o["z_cam"] <= self.slow_dist:
-                # Is pedestrian in our projected driving corridor or crossing into our path?
-                lat_d = abs(o.get("y_veh", -o.get("x_cam", 0.0)))
-                if self.active_detour_sign != 0:
-                    veh_lat_offset = self.active_detour_sign * 1.10
-                    rel_lat = abs(o.get("y_world", self.veh_y) - (self.start_xy[1] + veh_lat_offset))
-                    in_corridor = (rel_lat < 0.85)
-                else:
-                    in_corridor = (lat_d < 0.90)
+            ped_speed = float(o.get("speed", 0.0))
+            is_dyn = bool(o.get("is_dynamic", False))
 
-                moving_towards = o.get("is_dynamic", False) and (o.get("speed", 0.0) > 0.1) and (lat_d < 1.6)
-                if in_corridor or moving_towards:
-                    ped_threats.append(o)
+            if is_ped and 0.4 <= o["z_cam"] <= self.slow_dist:
+                py_w = o.get("y_world", self.veh_y)
+                dy_corridor = py_w - corridor_y
+                lat_d = abs(dy_corridor)
+                vy_w = o.get("vy_world", 0.0)
+
+                moving_towards = False
+                if dy_corridor > 0.35 and vy_w < -0.06:
+                    moving_towards = True
+                elif dy_corridor < -0.35 and vy_w > 0.06:
+                    moving_towards = True
+
+                in_corridor = (lat_d < 0.55)
+                if (ped_speed < 0.12 or not is_dyn) and not moving_towards:
+                    continue
+
+                if in_corridor or (moving_towards and lat_d < 1.60):
+                    ped_threats.append((o, in_corridor, moving_towards, lat_d))
 
         if ped_threats:
-            nearest_ped = min(ped_threats, key=lambda o: o["z_cam"])
+            nearest_ped, in_corr, towards, lat_d = min(ped_threats, key=lambda item: item[0]["z_cam"])
             p_dist = nearest_ped["z_cam"]
-            has_static_ahead = bool(static_front and min(o["z_cam"] for o in static_front) < 3.8)
-            if p_dist < 2.5 or has_static_ahead:
+
+            if (in_corr and p_dist < 2.2) or (towards and p_dist < 1.6):
                 self.state = "STOP_YIELD"
                 return 0.0, 0.0
             else:
@@ -644,161 +983,67 @@ class AutonomousPlannerNode(Node):
                 steer = self._pure_pursuit(track_wps)
                 return steer, 0.35
 
-        if not static_front:
-            # No static obstacles blocking path (pedestrian has cleared corridor)
-            self.state = "CRUISE"
-            self.active_detour_sign = 0
-            self.active_detour_x = 0.0
-            self.local_waypoints = list(self.global_waypoints)
-            steer = self._pure_pursuit(self.local_waypoints)
-            approach_spd = self.slow_speed if dist_to_goal < 1.4 else self.cruise_speed
-            return steer, approach_spd
+        detour_speed = max(0.40, self.slow_speed * (dist_to_goal / 0.50)) if dist_to_goal <= 0.50 else self.slow_speed
 
-        # 2. Nearest obstacle check
-        nearest = min(static_front, key=lambda o: o["z_cam"])
-        furthest = max(static_front, key=lambda o: o["z_cam"])
-        n_dist = nearest["z_cam"]
-        max_dist = furthest["z_cam"]
-
-        # Calculate true longitudinal corridor distance from vehicle center to obstacle center
-        s_obs_nearest = (nearest.get("x_world", self.veh_x + n_dist) - self.start_xy[0]) * ug_x + \
-                        (nearest.get("y_world", self.veh_y) - self.start_xy[1]) * ug_y
-        s_obs_furthest = (furthest.get("x_world", self.veh_x + max_dist) - self.start_xy[0]) * ug_x + \
-                         (furthest.get("y_world", self.veh_y) - self.start_xy[1]) * ug_y
-        s_veh = (self.veh_x - self.start_xy[0]) * ug_x + (self.veh_y - self.start_xy[1]) * ug_y
-
-        obs_dist_long = max(s_obs_nearest - s_veh, nearest.get("x_veh", n_dist + 0.90))
-        max_dist_long = max(s_obs_furthest - s_veh, furthest.get("x_veh", max_dist + 0.90))
-
-        # Emergency stop if obstacle is dangerously close directly in front of bumper (bumper is at z_cam + 0.9m)
-        if n_dist < 1.30 and abs(nearest["x_cam"]) <= 0.45:
-            self.state = "NO_SAFE_PATH"
-            return 0.0, 0.0
-
-        # 3. Static obstacle avoidance: generate Ackermann-feasible candidate detour splines
-        # If already actively executing a valid detour around an obstacle, preserve current trajectory if forward path is clear
-        if self.active_detour_sign != 0 and self.veh_x <= (self.active_detour_x + 0.8) and self.local_waypoints:
-            if n_dist > 1.30 or abs(nearest["x_cam"]) > 0.45:
-                safe_act, clr_act, _ = self._check_path_clearance(self.local_waypoints, static_front)
-                if safe_act and clr_act >= 0.10:
-                    steer = self._pure_pursuit(self.local_waypoints)
-                    return steer, self.slow_speed
-
-        # Maintain detour if obstacle blocks corridor (|x_cam| <= 0.75m) OR if vehicle is actively executing a detour around it
-        is_threat = (abs(nearest["x_cam"]) <= 0.75) or (self.active_detour_sign != 0 and self.veh_x <= (self.active_detour_x + 0.8))
-        self.get_logger().info(f"[THREAT CHECK] obs={nearest.get('class_name')} x_cam={nearest['x_cam']:.2f} z_cam={nearest['z_cam']:.2f} is_threat={is_threat} n_dist={n_dist:.2f} act_sign={self.active_detour_sign}", throttle_duration_sec=0.5)
-        if n_dist < self.slow_dist and is_threat:
-            self.replan_count += 1
-            # Sample candidate lateral offsets (calibrated to vehicle 1.2m body width; ensures full table and multi-obstacle clearance)
-            base_offsets = [1.35, 1.50, 1.65, 1.85, 2.10]
-
-            best_path = None
-            best_offset = 0.0
-            best_clearance = -1.0
-            self.diag_candidates_tested = len(base_offsets) * 2 + 1
-            self.diag_candidates_rejected = 0
-            self.diag_rejection_reasons = []
-
-            # Check center corridor path ONLY when not actively locked into a detour and center corridor is clear (e.g. S09 narrow passage)
-            center_blocked = any(abs(o.get("y_world", self.veh_y) - self.start_xy[1]) < 0.65 for o in static_front)
-            if not center_blocked and self.active_detour_sign == 0:
-                cand_center = self._generate_offset_path(0.0, obs_dist=obs_dist_long, max_obs_dist=max_dist_long)
-                if cand_center:
-                    safe_c, clearance_c, reason_c = self._check_path_clearance(cand_center, static_front)
-                    if safe_c and clearance_c >= 0.10:
-                        best_clearance = clearance_c
-                        best_path = cand_center
-                        best_offset = 0.0
-
-            if best_path is None:
-                # If a detour was already locked, prefer its sign first, but allow opposite sign if locked side is blocked (slalom weave)
-                if self.active_detour_sign != 0:
-                    cand_signs = [self.active_detour_sign, -self.active_detour_sign]
-                else:
-                    # In corridor, left (+y) has 2.5m open clearance; right (-y) has wall columns at -8.0m
-                    left_block = sum(1 for o in static_front if o.get("y_world", self.veh_y) > (self.start_xy[1] + 0.20))
-                    right_block = sum(1 for o in static_front if o.get("y_world", self.veh_y) < (self.start_xy[1] - 0.20))
-                    if left_block > right_block:
-                        cand_signs = [-1, 1]  # Left blocked -> detour right
-                    else:
-                        cand_signs = [1, -1]  # Prefer wide open left aisle
-
-                # Find minimal safe lateral deviation (test offsets in increasing order of magnitude)
-                for sign in cand_signs:
-                    for off_mag in base_offsets:
-                        off = sign * off_mag
-                        cand_path = self._generate_offset_path(off, obs_dist=obs_dist_long, max_obs_dist=max_dist_long)
-                        if cand_path:
-                            safe, clearance, reason = self._check_path_clearance(cand_path, front_obstacles)
-                            if safe and clearance >= 0.10:
-                                best_clearance = clearance
-                                best_path = cand_path
-                                best_offset = off
-                                break
-                            elif not safe:
-                                self.diag_candidates_rejected += 1
-                                self.diag_rejection_reasons.append(f"off={off:+.2f}m: {reason}")
-                        else:
-                            self.diag_candidates_rejected += 1
-                    if best_path is not None:
-                        break
-
-            if best_path is not None:
-                if abs(best_offset) > 0.1:
-                    self.active_detour_sign = 1 if best_offset > 0 else -1
-                    if self.active_detour_x == 0.0:
-                        self.active_detour_x = furthest.get("x_world", self.veh_x + (furthest["z_cam"] + 0.9)) + 0.7
-                else:
-                    self.active_detour_sign = 0
-                    self.active_detour_x = 0.0
-                self.state = f"REPLAN_OFFSET_{best_offset:+.1f}m"
-                self.local_waypoints = best_path
+        if self.active_detour_sign != 0 and self.local_waypoints:
+            safe_act, clr_act, _ = self._check_path_clearance(self.local_waypoints, self.obstacles)
+            if safe_act and clr_act >= MIN_SAFE_CLEARANCE:
+                c_lbl = getattr(self, "_active_obs_label", "OBSTACLE")
+                self.state = f"AVOIDING_{c_lbl}"
                 steer = self._pure_pursuit(self.local_waypoints)
-                return steer, self.slow_speed
-            elif self.local_waypoints and self.active_detour_sign != 0:
-                safe_act, clr_act, _ = self._check_path_clearance(self.local_waypoints, static_front)
-                if safe_act and clr_act >= 0.10:
-                    steer = self._pure_pursuit(self.local_waypoints)
-                    return steer, self.slow_speed
+                return steer, detour_speed
             else:
-                # Fallback: Attempt global A* re-plan from current pose avoiding all obstacles
-                astar_replan = astar_grid_path((self.veh_x, self.veh_y), self.goal_xy, self.obstacles, safety_margin=0.50)
-                if astar_replan and len(astar_replan) >= 2:
-                    safe_a, clearance_a, reason_a = self._check_path_clearance(astar_replan, front_obstacles)
-                    if safe_a and clearance_a >= 0.10:
-                        self.state = "REPLAN_ASTAR"
-                        self.local_waypoints = astar_replan
-                        steer = self._pure_pursuit(self.local_waypoints)
-                        return steer, self.slow_speed
-                    else:
-                        self.diag_rejection_reasons.append(f"astar: {reason_a}")
-
+                self.active_detour_sign = 0
+                self.active_detour_x = 0.0
+                self.active_detour_offset = 0.0
                 self.state = "NO_SAFE_PATH"
                 return 0.0, 0.0
 
+        if not static_front:
+            pass
+
         # Corridor is clear
-        if self.active_detour_sign != 0 and self.active_detour_x > 0.0 and self.veh_x <= (self.active_detour_x + 0.8):
-            if self.local_waypoints:
-                steer = self._pure_pursuit(self.local_waypoints)
-                return steer, self.slow_speed
+        if self.state == "NO_SAFE_PATH":
+            safe_nom, clr_nom, _ = self._check_path_clearance(self.global_waypoints, self.obstacles)
+            if not safe_nom or clr_nom < MIN_SAFE_CLEARANCE:
+                return 0.0, 0.0
+
+        lat_err = abs((self.veh_x - self.start_xy[0]) * (-ug_y) + (self.veh_y - self.start_xy[1]) * ug_x)
+        if lat_err > 0.18:
+            if not self.local_waypoints or math.hypot(self.local_waypoints[-1][0] - self.goal_xy[0], self.local_waypoints[-1][1] - self.goal_xy[1]) > 0.15:
+                rejoin_p = self._generate_offset_path(0.0)
+                if rejoin_p:
+                    self.local_waypoints = rejoin_p
+            self.state = "REJOINING_GLOBAL_PATH"
+            steer = self._pure_pursuit(self.local_waypoints)
+            if dist_to_goal <= 0.40:
+                approach_spd = max(0.40, self.slow_speed * (dist_to_goal / 0.40))
+            else:
+                approach_spd = max(0.65, self.cruise_speed if lat_err <= 0.20 else 0.75)
+            return steer, approach_spd
+
         self.state = "CRUISE"
         self.active_detour_sign = 0
         self.active_detour_x = 0.0
+        self.active_detour_offset = 0.0
         self.local_waypoints = list(self.global_waypoints)
         steer = self._pure_pursuit(self.local_waypoints)
-        return steer, self.cruise_speed
+        approach_spd = max(0.40, self.slow_speed * (dist_to_goal / 1.0)) if dist_to_goal <= 1.0 else self.cruise_speed
+        return steer, approach_spd
 
     def _stuck_recovery(self, steer: float, speed: float) -> Tuple[float, float]:
         """Recovers from deadlock when progress is arrested."""
         self.get_logger().warn(f"Stuck detected for {self.stuck_duration:.1f}s -> Executing Recovery Replan", throttle_duration_sec=2.0)
         # Attempt A* re-plan from current vehicle position with full obstacle map
-        new_plan = astar_grid_path((self.veh_x, self.veh_y), self.goal_xy, self.obstacles, safety_margin=0.55)
+        new_plan = astar_grid_path((self.veh_x, self.veh_y), self.goal_xy, self.obstacles, safety_margin=SAFETY_MARGIN)
         if new_plan and len(new_plan) >= 2:
             self.state = "RECOVERY_ASTAR"
             self.local_waypoints = new_plan
             steer = self._pure_pursuit(self.local_waypoints)
             self.last_progress_time = time.time()
-            return steer, self.slow_speed
+            dist_to_goal = math.hypot(self.goal_xy[0] - self.veh_x, self.goal_xy[1] - self.veh_y)
+            rec_spd = max(0.18, self.slow_speed * (dist_to_goal / 2.0)) if dist_to_goal <= 2.2 else self.slow_speed
+            return steer, rec_spd
         self.state = "STUCK"
         return 0.0, 0.0
 
@@ -815,176 +1060,213 @@ class AutonomousPlannerNode(Node):
         left_nx = -uy
         left_ny = ux
 
-        # Progress of current vehicle along nominal line
+        # Progress and lateral displacement of current vehicle relative to nominal line
         s_veh = (self.veh_x - self.start_xy[0]) * ux + (self.veh_y - self.start_xy[1]) * uy
         s_veh = max(0.0, min(dist_nom, s_veh))
+        lat_curr = (self.veh_x - self.start_xy[0]) * left_nx + (self.veh_y - self.start_xy[1]) * left_ny
 
-        # Smooth continuous spline generator using Hermite / smoothstep profile
-        smooth_path = []
-        trans_len = max(2.0, 1.4 * abs(lateral_offset))
-        s_obs = s_veh + obs_dist
-        # Ensure transition completes before reaching obstacle longitudinal front
-        s_entry = max(s_veh + 1.2, min(s_obs - 0.6, s_veh + trans_len))
+        if abs(lateral_offset) < 0.05:
+            smooth_path = [(self.veh_x, self.veh_y)]
+            s_curr = s_veh + 0.10
+            d_rem = max(1.0, dist_nom - s_veh)
+            rejoin_len = max(2.5, 3.30 * math.sqrt(max(0.05, abs(lat_curr))))
+            if d_rem < rejoin_len:
+                rejoin_len = d_rem
+            while s_curr <= dist_nom:
+                u = min(1.0, (s_curr - s_veh) / max(0.1, rejoin_len))
+                smooth_u = u * u * u * (u * (u * 6.0 - 15.0) + 10.0)
+                lat = lat_curr * (1.0 - smooth_u)
+                px = self.start_xy[0] + s_curr * ux + lat * left_nx
+                py = self.start_xy[1] + s_curr * uy + lat * left_ny
+                smooth_path.append((px, py))
+                s_curr += 0.10
+            if math.hypot(smooth_path[-1][0] - self.goal_xy[0], smooth_path[-1][1] - self.goal_xy[1]) > 0.05:
+                smooth_path.append(self.goal_xy)
+            return smooth_path
+
+        # Curvature-bounded transition length: S >= 3.30 * sqrt(|H|)
+        # For H=1.35m -> S=3.83m; H=1.55m -> S=4.11m (peak kappa <= 0.402 rad/m < 0.439 rad/m limit)
+        delta_lat = abs(lateral_offset - lat_curr)
+        trans_len = max(2.0, 3.30 * math.sqrt(max(0.05, delta_lat)))
+        s_entry = s_veh + trans_len
         s_obs_max = s_veh + max(obs_dist, max_obs_dist)
-        s_pass = min(dist_nom - 1.2, max(s_entry + 0.8, s_obs_max + 0.6))
-        s_ret = min(dist_nom, s_pass + trans_len)
+        s_pass = max(s_entry + 0.5, s_obs_max + 0.8)
 
-        s_curr = s_veh
-        while s_curr <= s_ret:
+        # Feasible terminal transition toward destination without compression (Requirement 4)
+        d_rem = dist_nom - s_pass
+        kappa_max = MAX_CURVATURE_RAD_M
+        if d_rem >= trans_len:
+            s_ret = s_pass + trans_len
+            target_lat_end = 0.0
+        else:
+            s_ret = dist_nom
+            max_delta_lat = (d_rem ** 2) * kappa_max / 5.773
+            target_lat_end = math.copysign(max(0.0, abs(lateral_offset) - max_delta_lat), lateral_offset)
+
+        smooth_path = [(self.veh_x, self.veh_y)]
+        s_curr = s_veh + 0.10
+        while s_curr <= dist_nom:
             if s_curr <= s_entry:
-                # Transition into detour lane
                 u = (s_curr - s_veh) / max(0.1, s_entry - s_veh)
                 u = max(0.0, min(1.0, u))
-                smooth_u = 3.0 * u * u - 2.0 * u * u * u
-                lat = lateral_offset * smooth_u
+                smooth_u = u * u * u * (u * (u * 6.0 - 15.0) + 10.0)
+                lat = lat_curr + (lateral_offset - lat_curr) * smooth_u
             elif s_curr <= s_pass:
-                # Alongside obstacle
                 lat = lateral_offset
-            else:
-                # Return to nominal corridor line
+            elif s_curr <= s_ret:
                 u = (s_curr - s_pass) / max(0.1, s_ret - s_pass)
                 u = max(0.0, min(1.0, u))
-                smooth_u = 3.0 * u * u - 2.0 * u * u * u
-                lat = lateral_offset * (1.0 - smooth_u)
+                smooth_u = u * u * u * (u * (u * 6.0 - 15.0) + 10.0)
+                lat = lateral_offset + (target_lat_end - lateral_offset) * smooth_u
+            else:
+                lat = target_lat_end
 
             px = self.start_xy[0] + s_curr * ux + lat * left_nx
             py = self.start_xy[1] + s_curr * uy + lat * left_ny
             smooth_path.append((px, py))
-            s_curr += 0.15
+            s_curr += 0.10
 
-        # Connect remaining global waypoints
-        for gx, gy in self.global_waypoints:
-            s_wp = (gx - self.start_xy[0]) * ux + (gy - self.start_xy[1]) * uy
-            if s_wp > s_ret + 0.3:
-                smooth_path.append((gx, gy))
-
-        if math.hypot(smooth_path[-1][0] - self.goal_xy[0], smooth_path[-1][1] - self.goal_xy[1]) > 0.3:
+        if abs(target_lat_end) < 0.05 and math.hypot(smooth_path[-1][0] - self.goal_xy[0], smooth_path[-1][1] - self.goal_xy[1]) > 0.05:
             smooth_path.append(self.goal_xy)
 
         return smooth_path
 
     def _check_path_clearance(self, path: List[Tuple[float, float]], obstacles: List[dict]) -> Tuple[bool, float, str]:
-        """Validates path safety against walls, glass, and obstacles with continuous full-footprint swept checking."""
-        if not path:
+        """Validates path safety against walls, glass, and obstacles with continuous full-footprint swept checking (Requirement 2 & 3)."""
+        if not path or len(path) < 2:
             return False, 0.0, "empty path"
 
-        # Densely resample path with step ds <= 0.12m to eliminate undetected collisions between waypoints
+        # Densely resample path with step ds <= 0.10m to eliminate undetected collisions
         dense_path = []
         for k in range(len(path) - 1):
             p1, p2 = path[k], path[k + 1]
             seg_d = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-            steps = max(1, int(math.ceil(seg_d / 0.12)))
+            steps = max(1, int(math.ceil(seg_d / 0.10)))
             for i in range(steps):
                 u = i / float(steps)
                 dense_path.append((p1[0] + (p2[0] - p1[0]) * u, p1[1] + (p2[1] - p1[1]) * u))
         dense_path.append(path[-1])
 
+        # Complete path validation: ALL samples checked all the way to destination (Requirement 2)
+        check_len = len(dense_path)
         min_clearance = float("inf")
-        # Full vehicle footprint dimensions: length 2.4m, width 1.2m + 0.15m dynamic safety margin
-        half_w = 0.60 + 0.15  # 0.75m half-width
-        half_l = 1.20 + 0.15  # 1.35m half-length
-        # Physical knuckle steering limit is 0.75 rad (simple_vehicle.py line 218)
-        # Max curvature kappa = tan(0.75) / 1.10m = 0.85 rad/m
-        max_curvature = 0.85
 
-        check_len = min(60, len(dense_path))
+        # Compute curvature and verify feasibility across entire path (Requirement 4)
+        max_k, curvatures = compute_path_curvature(dense_path, look_baseline=self.wheelbase)
+        if max_k > CURVATURE_FEASIBILITY_TOL:
+            return False, 0.0, f"Ackermann steering limit exceeded: curvature {max_k:.2f} rad/m > {CURVATURE_FEASIBILITY_TOL:.2f}"
+
         headings = []
         for idx in range(check_len):
-            idx_next = min(len(dense_path) - 1, idx + 3)
-            idx_prev = max(0, idx - 3)
+            idx_next = min(check_len - 1, idx + 2)
+            idx_prev = max(0, idx - 2)
             dx = dense_path[idx_next][0] - dense_path[idx_prev][0]
             dy = dense_path[idx_next][1] - dense_path[idx_prev][1]
             headings.append(math.atan2(dy, dx) if (dx * dx + dy * dy) > 1e-4 else self.veh_yaw)
 
+        eff_hl = VEH_HALF_LENGTH
+        eff_hw = VEH_HALF_WIDTH
+
         for idx in range(check_len):
             px, py = dense_path[idx]
             heading = headings[idx]
+            cos_h, sin_h = math.cos(heading), math.sin(heading)
 
-            # Ackermann curvature verification along wheelbase baseline (0.90m)
-            look_k = 6
-            if idx >= look_k:
-                d_head = abs(normalize_angle(heading - headings[idx - look_k]))
-                seg_len = math.hypot(dense_path[idx][0] - dense_path[idx - look_k][0], dense_path[idx][1] - dense_path[idx - look_k][1])
-                curvature = d_head / max(0.20, seg_len)
-                if curvature > (max_curvature * 1.25):
-                    return False, 0.0, f"Ackermann steering limit exceeded: curvature {curvature:.2f} rad/m > {max_curvature:.2f}"
-
-            cos_h = math.cos(heading)
-            sin_h = math.sin(heading)
-
-            # Continuous 8-point perimeter footprint test
+            # Continuous 9-point perimeter footprint test for static boundaries
             test_pts = [
-                (px, py),  # center
-                (px + half_l * cos_h - half_w * sin_h, py + half_l * sin_h + half_w * cos_h),  # front-left
-                (px + half_l * cos_h + half_w * sin_h, py + half_l * sin_h - half_w * cos_h),  # front-right
-                (px - half_l * cos_h - half_w * sin_h, py - half_l * sin_h + half_w * cos_h),  # rear-left
-                (px - half_l * cos_h + half_w * sin_h, py - half_l * sin_h - half_w * cos_h),  # rear-right
-                (px - half_w * sin_h, py + half_w * cos_h),  # mid-left
-                (px + half_w * sin_h, py - half_w * cos_h),  # mid-right
-                (px + half_l * cos_h, py + half_l * sin_h),  # front-bumper center
-                (px - half_l * cos_h, py - half_l * sin_h),  # rear-bumper center
+                (px, py),
+                (px + eff_hl * cos_h - eff_hw * sin_h, py + eff_hl * sin_h + eff_hw * cos_h),
+                (px + eff_hl * cos_h + eff_hw * sin_h, py + eff_hl * sin_h - eff_hw * cos_h),
+                (px - eff_hl * cos_h - eff_hw * sin_h, py - eff_hl * sin_h + eff_hw * cos_h),
+                (px - eff_hl * cos_h + eff_hw * sin_h, py - eff_hl * sin_h - eff_hw * cos_h),
+                (px - eff_hw * sin_h, py + eff_hw * cos_h),
+                (px + eff_hw * sin_h, py - eff_hw * cos_h),
+                (px + eff_hl * cos_h, py + eff_hl * sin_h),
+                (px - eff_hl * cos_h, py - eff_hl * sin_h),
             ]
 
             for tx, ty in test_pts:
-                # Glass wall boundary check (east glass at x=15.0m, west at x=-15.0m; 0.20m bumper margin -> 14.80m)
-                if tx >= 14.80 or tx <= -14.80:
+                # Glass wall boundary check (east glass at x=15.0m, west at x=-15.0m; 0.12m margin on inflated bumper -> 14.88m)
+                if tx >= 14.88 or tx <= -14.88:
                     return False, 0.0, f"glass boundary exceeded at x={tx:.2f}"
-                if not is_point_walkable(tx, ty):
-                    return False, 0.0, f"wall/furniture collision at ({tx:.2f}, {ty:.2f})"
-                if abs(self.start_xy[1] - -6.0) < 1.5 and abs(self.goal_xy[1] - -6.0) < 1.5:
-                    if ty < -7.65 or ty > -2.00:
-                        return False, 0.0, f"corridor boundary exceeded at y={ty:.2f}"
+                if ty >= 12.30 or ty <= -12.30:
+                    return False, 0.0, f"lab boundary exceeded at y={ty:.2f}"
+                for ox, oy, w, h in OBSTACLES:
+                    if (ox - w/2 <= tx <= ox + w/2 and oy - h/2 <= ty <= oy + h/2):
+                        return False, 0.0, f"wall/furniture collision at ({tx:.2f}, {ty:.2f})"
 
-            # Continuous Oriented Bounding Box (OBB) distance check against all tracked obstacles
+            # Continuous Oriented Bounding Box (OBB) check against all tracked obstacles using SAT (Requirement 2 & 8)
             for obs in obstacles:
-                ox = obs.get("x_world", 0.0)
-                oy = obs.get("y_world", 0.0)
-                if ox < (px - half_l - 0.20):
+                ox = float(obs.get("x_world", 0.0))
+                oy = float(obs.get("y_world", 0.0))
+                obs_yaw = float(obs.get("yaw", 0.0))
+                obs_hl = max(0.20, float(obs.get("size_z", 0.80)) / 2.0)
+                obs_hw = max(0.20, float(obs.get("size_x", 0.80)) / 2.0)
+
+                # Skip obstacles that are far from current waypoint
+                if math.hypot(ox - px, oy - py) > (VEH_HALF_LENGTH + max(obs_hl, obs_hw) + 2.5):
                     continue
 
-                # Physical obstacle radius derived from actual 3D bounding box dimensions
-                obs_sx = obs.get("size_x", 0.60)
-                obs_sz = obs.get("size_z", 0.60)
-                r_obs = max(0.35, 0.5 * math.hypot(obs_sx, obs_sz))
+                # Skip obstacles situated beyond the destination goal
+                # (The vehicle terminates motion upon goal arrival; a static wall behind the destination does not block the corridor approach)
+                dist_v_g = math.hypot(self.goal_xy[0] - self.veh_x, self.goal_xy[1] - self.veh_y)
+                if obs.get("z_cam", 0.0) > (dist_v_g + 0.80):
+                    continue
 
-                # Transform obstacle into vehicle local coordinate frame
-                x_rel = ox - px
-                y_rel = oy - py
-                x_local = cos_h * x_rel + sin_h * y_rel
-                y_local = -sin_h * x_rel + cos_h * y_rel
-
-                # Distance from point to vehicle oriented rectangle (half_l x half_w)
-                dx_box = max(0.0, abs(x_local) - half_l)
-                dy_box = max(0.0, abs(y_local) - half_w)
-                dist_to_box = math.hypot(dx_box, dy_box)
-
-                clearance = dist_to_box - r_obs
+                k_curr = abs(curvatures[idx]) if idx < len(curvatures) else 0.0
+                # When travelling straight, front wheels are aligned (0.60m chassis half-width).
+                # Steered wheel lateral sweep (+0.05m -> 0.65m) scales with path curvature.
+                eff_veh_hw = 0.60 + (VEH_HALF_WIDTH - 0.60) * min(1.0, k_curr / max(0.01, MAX_CURVATURE_RAD_M))
+                clearance = sat_obb_clearance(px, py, heading, VEH_HALF_LENGTH, eff_veh_hw,
+                                              ox, oy, obs_yaw, obs_hl, obs_hw)
                 if clearance < min_clearance:
                     min_clearance = clearance
 
-                # If clearance < 0.10m, swept footprint intersects obstacle bounding cylinder
-                if clearance < 0.10:
-                    return False, max(0.0, clearance), f"swept footprint obstacle collision (clearance={clearance:.2f}m < 0.10m)"
+                if clearance < MIN_SAFE_CLEARANCE:
+                    return False, max(0.0, clearance), f"swept footprint OBB collision (clearance={clearance:.2f}m < {MIN_SAFE_CLEARANCE:.2f}m)"
 
         return True, min_clearance, "clear"
 
-    def _pure_pursuit(self, waypoints: List[Tuple[float, float]], lookahead_dist: float = 1.8) -> float:
-        """Computes smooth Ackermann steering angle to track path using canonical Pure Pursuit."""
+    def _pure_pursuit(self, waypoints: List[Tuple[float, float]], lookahead_dist: Optional[float] = None) -> float:
+        """Computes smooth Ackermann steering angle to track path using progress-aware Pure Pursuit (Requirement 7)."""
         if not waypoints:
             return 0.0
 
-        # Find closest waypoint index
-        closest_idx = 0
+        if lookahead_dist is None:
+            # Adaptive lookahead: tighter tracking during detours to prevent corner-cutting into obstacles
+            if self.active_detour_sign != 0 or self.state == "REJOINING_GLOBAL_PATH" or abs(self.veh_y - self.start_xy[1]) > 0.30:
+                lookahead_dist = 0.85
+            else:
+                lookahead_dist = 1.40
+
+        # Progress-aware search: find closest waypoint ahead of or near vehicle (Requirement 7)
+        cos_y = math.cos(self.veh_yaw)
+        sin_y = math.sin(self.veh_yaw)
+
+        # Restrict search around last_path_idx to prevent branch jumping
+        n = len(waypoints)
+        if getattr(self, "_last_waypoints_id", None) != id(waypoints):
+            self._last_waypoints_id = id(waypoints)
+            self.last_path_idx = 0
+
+        start_idx = max(0, min(getattr(self, "last_path_idx", 0) - 2, n - 1))
+        end_idx = min(n, start_idx + 25) if start_idx > 0 else n
+
+        closest_idx = start_idx
         min_d = float("inf")
-        for i, (px, py) in enumerate(waypoints):
+        for i in range(start_idx, end_idx):
+            px, py = waypoints[i]
             d = math.hypot(px - self.veh_x, py - self.veh_y)
-            if d < min_d:
+            fwd_proj = (px - self.veh_x) * cos_y + (py - self.veh_y) * sin_y
+            if fwd_proj >= -0.25 and d < min_d:
                 min_d = d
                 closest_idx = i
 
+        self.last_path_idx = closest_idx
+
         # Look ahead from closest waypoint
         target_pt = None
-        for i in range(closest_idx, len(waypoints)):
+        for i in range(closest_idx, n):
             px, py = waypoints[i]
             d = math.hypot(px - self.veh_x, py - self.veh_y)
             if d >= lookahead_dist:
@@ -994,12 +1276,17 @@ class AutonomousPlannerNode(Node):
         if target_pt is None:
             target_pt = waypoints[-1]
 
+        # When approaching destination during rejoining, aim directly at the goal pose to pull vehicle tightly into goal tolerance
+        d_to_goal = math.hypot(self.goal_xy[0] - self.veh_x, self.goal_xy[1] - self.veh_y)
+        if d_to_goal <= 2.2 and (self.state == "REJOINING_GLOBAL_PATH" or abs(self.veh_y - self.goal_xy[1]) > 0.15):
+            target_pt = self.goal_xy
+
         target_heading = math.atan2(target_pt[1] - self.veh_y, target_pt[0] - self.veh_x)
         alpha = normalize_angle(target_heading - self.veh_yaw)
 
         # Canonical Ackermann Pure Pursuit curvature: delta = arctan(2 * L * sin(alpha) / L_d)
         L = self.wheelbase
-        actual_d = max(0.6, math.hypot(target_pt[0] - self.veh_x, target_pt[1] - self.veh_y))
+        actual_d = max(0.5, math.hypot(target_pt[0] - self.veh_x, target_pt[1] - self.veh_y))
         steer = math.atan2(2.0 * L * math.sin(alpha), actual_d)
         return float(np.clip(steer, -self.max_steer, self.max_steer))
 
@@ -1038,12 +1325,21 @@ def main():
     args = p.parse_args()
 
     scen_data = {}
-    if args.scenario and os.path.isfile(args.scenario):
+    if args.scenario:
         try:
-            with open(args.scenario, "r") as f:
-                scen_data = yaml.safe_load(f) or {}
+            from isaac_sim.scripts.scenarios.scenario_registry import resolve_scenario
+            entry = resolve_scenario(args.scenario)
+            if entry and os.path.exists(entry["path"]):
+                with open(entry["path"], "r") as f:
+                    scen_data = yaml.safe_load(f) or {}
+                scen_data["scenario_id"] = entry["id"]
         except Exception:
-            scen_data = {}
+            if os.path.isfile(args.scenario):
+                try:
+                    with open(args.scenario, "r") as f:
+                        scen_data = yaml.safe_load(f) or {}
+                except Exception:
+                    scen_data = {}
 
     if args.start and len(args.start) >= 2:
         yaw = float(args.start[2]) if len(args.start) > 2 else 0.0

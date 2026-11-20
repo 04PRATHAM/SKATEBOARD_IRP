@@ -49,6 +49,9 @@ from std_msgs.msg import Bool, String, Float32
 from isaac_sim.scripts.navigation.navmesh import (
     OBSTACLES, LAB_X_MIN, LAB_X_MAX, LAB_Y_MIN, LAB_Y_MAX, is_point_walkable
 )
+from rgbd_perception.vehicle_footprint import (
+    VEH_HALF_LENGTH, VEH_HALF_WIDTH, SAFETY_MARGIN
+)
 import yaml
 
 ROOT = "/home/ubuntu/SKATEBOARD_IRP"
@@ -155,6 +158,7 @@ class TopDownVisualizerNode(Node):
         self.create_subscription(TFMessage, "/tf", self.on_tf, 10)
         self.create_subscription(String, "/planning/planner_state", self.on_planner_state, 10)
         self.create_subscription(String, "/planning/switch_scenario", self.on_switch_scenario, 10)
+        self.create_subscription(String, "/planning/scenario_id", self.on_scenario_id_sub, 10)
         self.create_subscription(Bool, "/vehicle/wheel_slip", self.on_wheel_slip, 10)
         self.create_subscription(String, "/vehicle/odom_status", self.on_odom_status, 10)
         self.create_subscription(Float32, "/vehicle/visual_odom_confidence", self.on_vis_conf, 10)
@@ -274,6 +278,19 @@ class TopDownVisualizerNode(Node):
             if sc["id"].lower() == target or str(idx) == target or sc["name"].lower() == target:
                 self.load_scenario(idx, notify_sim=True)
                 break
+
+    def on_scenario_id_sub(self, msg: String):
+        raw = msg.data.strip()
+        target_info = resolve_scenario(raw)
+        if target_info:
+            target_id = target_info["id"].lower()
+            if getattr(self, "scenario_id", "").lower() == target_id:
+                return
+            for idx, sc in enumerate(SCENARIOS):
+                if sc["id"].lower() == target_id:
+                    self.load_scenario(idx, notify_sim=False)
+                    self.get_logger().info(f"[VISUALIZER SYNC] Synced active scenario to {target_info['name']}")
+                    return
 
     def on_wheel_slip(self, msg: Bool):
         self.wheel_slip_active = bool(msg.data)
@@ -503,6 +520,7 @@ class TopDownVisualizerNode(Node):
                 break
 
     def on_obstacles(self, msg: Detection3DArray):
+        self.last_obstacles_stamp = time.time()
         obs_list = []
         pred_list = []
         cos_y = math.cos(self.veh_yaw)
@@ -513,6 +531,10 @@ class TopDownVisualizerNode(Node):
                 ox = float(d.bbox.center.position.x)
                 oy = float(d.bbox.center.position.y)
                 oz = float(d.bbox.center.position.z)
+
+                # Filter out unphysical or invalid depth values
+                if not (0.25 <= oz <= 15.0 and abs(ox) <= 12.0 and abs(oy) <= 5.0):
+                    continue
 
                 cid_str = d.results[0].hypothesis.class_id if d.results else ""
                 parts = cid_str.split(":")
@@ -525,6 +547,10 @@ class TopDownVisualizerNode(Node):
                 if len(d.results) > 1 and d.results[1].hypothesis.class_id == "velocity_m_s":
                     spd = float(d.results[1].hypothesis.score)
 
+                # Physical 3D bounding box dimensions
+                obs_sx = float(d.bbox.size.x) if d.bbox.size.x > 0 else 0.80
+                obs_sz = float(d.bbox.size.z) if d.bbox.size.z > 0 else 0.80
+
                 # Camera optical -> Vehicle frame
                 cos_p = 0.98877
                 sin_p = -0.14944
@@ -533,10 +559,14 @@ class TopDownVisualizerNode(Node):
                 x_w = self.veh_x + x_veh * cos_y - y_veh * sin_y
                 y_w = self.veh_y + x_veh * sin_y + y_veh * cos_y
 
+                # Sanity check laboratory boundaries
+                if not (LAB_X_MIN - 2.0 <= x_w <= LAB_X_MAX + 2.0 and LAB_Y_MIN - 2.0 <= y_w <= LAB_Y_MAX + 2.0):
+                    continue
+
                 obs_list.append({
                     "id": tid, "cname": cname, "is_dyn": is_dyn,
                     "x_w": x_w, "y_w": y_w, "dist": math.hypot(x_veh, y_veh),
-                    "speed": spd,
+                    "speed": spd, "sx": obs_sx, "sz": obs_sz,
                 })
 
                 if is_dyn and spd > 0.15:
@@ -556,6 +586,11 @@ class TopDownVisualizerNode(Node):
         self.predicted_trajectories = pred_list
 
     def render_frame(self):
+        # Expire stale obstacle tracks if no updates received in 0.60 seconds
+        if time.time() - getattr(self, "last_obstacles_stamp", 0.0) > 0.60:
+            self.obstacles = []
+            self.predicted_trajectories = []
+
         # Update ground-truth pose from simulator socket
         if self.gt_sock:
             try:
@@ -634,14 +669,52 @@ class TopDownVisualizerNode(Node):
             pts = np.array([self.world_to_pixel(x, y) for x, y in self.actual_trail], dtype=np.int32)
             cv2.polylines(canvas, [pts], isClosed=False, color=(40, 140, 250), thickness=2, lineType=cv2.LINE_AA)
 
-        # 10. Draw Detected Obstacles & Safety Margins (RED + YELLOW)
+        # 10. Draw Detected Obstacles & Safety Margins (Requirement 8)
+        # Renders the actual rectangular physical footprint and the expanded clearance boundary matching the planner
+        veh_hl = VEH_HALF_LENGTH
+        veh_hw = VEH_HALF_WIDTH
+        safety_margin = SAFETY_MARGIN
         for obs in self.obstacles:
-            op = self.world_to_pixel(obs["x_w"], obs["y_w"])
-            rad_px = int(0.65 / (self.world_max_x - self.world_min_x) * (self.map_x_max - self.map_x_min))
-            cv2.circle(canvas, op, rad_px, (40, 210, 240), 1)  # Yellow 0.65m safety margin
-            cv2.circle(canvas, op, 6, (40, 40, 240), -1)       # Red obstacle center
-            lbl = f"{obs['cname']}:{obs['id']}"
-            cv2.putText(canvas, lbl, (op[0] + 8, op[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 180, 240), 1)
+            ox = obs["x_w"]
+            oy = obs["y_w"]
+            obs_hl = max(0.20, float(obs.get("sz", 0.80)) / 2.0)
+            obs_hw = max(0.20, float(obs.get("sx", 0.80)) / 2.0)
+            cname = obs.get("cname", "obstacle").lower()
+
+            # Planner clearance exclusion box (obstacle + vehicle footprint + margin)
+            buf_hx = obs_hl + veh_hl + safety_margin
+            buf_hy = obs_hw + veh_hw + safety_margin
+            pt_buf_tl = self.world_to_pixel(ox - buf_hx, oy + buf_hy)
+            pt_buf_br = self.world_to_pixel(ox + buf_hx, oy - buf_hy)
+            cv2.rectangle(canvas, pt_buf_tl, pt_buf_br, (40, 210, 240), 1)  # Yellow clearance border
+
+            # Physical obstacle rendering based on classification
+            op = self.world_to_pixel(ox, oy)
+            if cname == "pillar":
+                # Render pillar as circular/cylindrical cross-section
+                r_px = max(6, int(max(obs_hw, obs_hl) / (self.world_max_x - self.world_min_x) * (self.map_x_max - self.map_x_min)))
+                cv2.circle(canvas, op, r_px, (140, 120, 20), -1)
+                cv2.circle(canvas, op, r_px, (255, 230, 0), 2)
+                lbl = f"PILLAR:{obs['id']} (D={max(obs_hw, obs_hl)*2:.2f}m)"
+                cv2.putText(canvas, lbl, (op[0] + r_px + 4, op[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 240, 100), 1)
+            elif cname == "wall":
+                # Render wall as solid brick/red block
+                pt_tl = self.world_to_pixel(ox - obs_hl, oy + obs_hw)
+                pt_br = self.world_to_pixel(ox + obs_hl, oy - obs_hw)
+                cv2.rectangle(canvas, pt_tl, pt_br, (20, 20, 140), -1)
+                cv2.rectangle(canvas, pt_tl, pt_br, (0, 0, 255), 2)
+                lbl = f"WALL:{obs['id']} ({obs_hw*2:.1f}x{obs_hl*2:.1f}m)"
+                cv2.putText(canvas, lbl, (op[0] + 8, op[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (120, 140, 255), 1)
+            else:
+                pt_tl = self.world_to_pixel(ox - obs_hl, oy + obs_hw)
+                pt_br = self.world_to_pixel(ox + obs_hl, oy - obs_hw)
+                cv2.rectangle(canvas, pt_tl, pt_br, (30, 30, 160), -1)  # Dark red fill
+                cv2.rectangle(canvas, pt_tl, pt_br, (50, 50, 240), 2)   # Bright red outline
+                lbl = f"{obs['cname']}:{obs['id']} ({obs_hw*2:.1f}x{obs_hl*2:.1f}m)"
+                cv2.putText(canvas, lbl, (op[0] + 8, op[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 180, 240), 1)
+
+            # Center marker
+            cv2.circle(canvas, op, 3, (255, 255, 255), -1)
 
         # 11. Draw Predicted Dynamic Trajectories (CYAN/PURPLE)
         for traj in self.predicted_trajectories:
@@ -672,6 +745,8 @@ class TopDownVisualizerNode(Node):
             self.last_save_time = now
             self._save_categorized_evidence(canvas)
             self.frame_idx += 1
+
+        return canvas
 
     def _render_header(self, canvas):
         cv2.rectangle(canvas, (0, 0), (self.img_w, 65), (12, 15, 20), -1)
@@ -859,8 +934,14 @@ class TopDownVisualizerNode(Node):
             state_str = "PAUSED / HOLD"
             state_color = (140, 140, 255)
         elif "NO_SAFE_PATH" in self.planner_state or (self.cmd_speed == 0.0 and self.obstacles and min(o["dist"] for o in self.obstacles) < 1.5):
-            state_str = "STOPPED (SAFE HOLD)"
+            state_str = "STOPPED (SAFE HOLD - NO SAFE PATH)"
             state_color = (40, 40, 240)
+        elif "AVOIDING" in self.planner_state:
+            state_str = f"AVOIDING OBSTACLE ({self.planner_state})"
+            state_color = (40, 220, 240)
+        elif "REJOINING" in self.planner_state:
+            state_str = "REJOINING GLOBAL PATH"
+            state_color = (60, 240, 180)
         elif abs(self.cmd_steer) > 0.20:
             state_str = "REPLAN / DETOUR"
             state_color = (40, 220, 240)
@@ -869,7 +950,8 @@ class TopDownVisualizerNode(Node):
             state_color = (0, 180, 240)
 
         lines = [
-            (f"Scenario: {SCENARIOS[self.current_scen_idx]['id'].upper()} - {SCENARIOS[self.current_scen_idx]['name'].split(': ')[-1]}", (220, 220, 220)),
+            (f"Session: {os.environ.get('SESSION_ID', '078b08e1')} | ROS Domain: {os.environ.get('ROS_DOMAIN_ID', '0')}", (160, 210, 160)),
+            (f"Scenario: {SCENARIOS[self.current_scen_idx]['id'].upper()} - {SCENARIOS[self.current_scen_idx]['name'].split(': ')[-1]}", (240, 240, 240)),
             (f"State: {state_str}", state_color),
             (f"Cmd Speed: {self.cmd_speed:.2f} m/s", (220, 220, 220)),
             (f"Cmd Steer: {math.degrees(self.cmd_steer):+.1f} deg", (220, 220, 220)),
